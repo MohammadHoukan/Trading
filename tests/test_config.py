@@ -41,3 +41,13 @@ def test_redis_config_has_channels():
     channels = config['redis']['channels']
     assert 'command' in channels
     assert 'status' in channels
+
+
+def test_dashboard_stale_timeout_is_int_and_positive():
+    """Dashboard worker stale timeout is normalized to positive int."""
+    config = load_config()
+
+    assert 'dashboard' in config
+    stale_after_seconds = config['dashboard']['worker_stale_after_seconds']
+    assert isinstance(stale_after_seconds, int)
+    assert stale_after_seconds > 0

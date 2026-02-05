@@ -10,9 +10,10 @@ class RegimeFilter:
         self.config = config
         
         # Thresholds
-        self.adx_threshold = config.get('regime', {}).get('adx_threshold', 30.0)
-        self.timeframe = config.get('regime', {}).get('timeframe', '1h')
-        self.symbol = "SOL/USDT" # Monitor the main pair for now, or configurable
+        regime_cfg = config.get('regime', {})
+        self.adx_threshold = regime_cfg.get('adx_threshold', 30.0)
+        self.timeframe = regime_cfg.get('timeframe', '1h')
+        self.symbol = regime_cfg.get('symbol', 'SOL/USDT')
         
         # Re-use OrderManager for data fetching
         self.data_source = OrderManager(
@@ -43,8 +44,13 @@ class RegimeFilter:
             if adx_df is None or adx_df.empty:
                 return 'UNKNOWN'
 
-            # Get latest ADX value (ADX_14 column)
-            current_adx = adx_df.iloc[-1]['ADX_14']
+            # Get latest ADX value (ADX_14 or similar column)
+            adx_col = next((c for c in adx_df.columns if str(c).startswith('ADX_')), None)
+            if not adx_col:
+                return 'UNKNOWN'
+            current_adx = adx_df.iloc[-1][adx_col]
+            if pd.isna(current_adx):
+                return 'UNKNOWN'
             
             self.logger.info(f"Market Analysis [{self.symbol}]: ADX={current_adx:.2f}")
 

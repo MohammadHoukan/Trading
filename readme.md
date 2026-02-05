@@ -12,7 +12,7 @@ This system is engineered with strict **Risk & Asset Constraints**:
 2. **Zero Leverage:** Operates strictly on a 1:1 capital basis (no margin borrowing).
 3. **Long-Only:** No short selling. The system focuses on accumulating and selling the underlying asset.
 
-It utilizes a **Hub-and-Spoke** architecture to manage concurrency, allowing multiple assets to be traded simultaneously while maintaining a global risk state. The current implementation focuses on orchestration, messaging, and status reporting; grid execution and risk controls are still stubs.
+It utilizes a **Hub-and-Spoke** architecture to manage concurrency, allowing multiple assets to be traded simultaneously while maintaining a global risk state. Grid execution is basic (initial placement + rebalancing), while risk controls remain stubs.
 
 ## 🏗 Architecture
 
@@ -25,8 +25,8 @@ The system mimics a microservices pattern using **Redis Pub/Sub** for inter-proc
 
 * **🐝 The Workers (Swarm):**
 * Independent processes spawned per trading pair (e.g., `SOL/USDT`, `ETH/USDT`).
-* Maintain their heartbeat with unique worker IDs (order/grid state is planned).
-* Current loop fetches ticker data and reports status (grid logic is a stub).
+* **Dynamic Key Pool:** Workers "claim" a unique API Key from Redis at startup to prevent Nonce collisions.
+* Place initial grid orders and rebalance on fills (basic implementation).
 
 
 * **📡 The Bus (Redis):**
@@ -68,7 +68,7 @@ spot-grid-swarm/
 │   └── database.py        # SQLite interface
 ├── config/
 │   ├── settings.yaml      # Exchange keys and system constants
-│   └── strategies.json    # [STUB] Grid parameters (Upper/Lower limits) per pair
+│   └── strategies.json    # Grid parameters (Upper/Lower limits) per pair
 ├── tests/                 # Smoke and unit tests
 ├── dashboard/             # Streamlit UI
 ├── .agent/workflows/      # Agentic runbooks (setup/start)
@@ -105,7 +105,6 @@ cp .env.example .env
 
 The system resolves `${VAR}` or `${VAR:-default}` in `config/settings.yaml` via `python-dotenv`.
 Numeric values (e.g., `REDIS_PORT`, `RISK_PER_BOT`) are coerced to `int/float` with validation.
-`config/strategies.json` is not wired into the worker yet; grid settings are currently passed via CLI flags.
 
 Example `config/settings.yaml`:
 
@@ -113,8 +112,13 @@ Example `config/settings.yaml`:
 exchange:
   name: binance
   mode: testnet  # Toggle 'live' for production
-  api_key: "${BINANCE_API_KEY}"
-  secret: "${BINANCE_SECRET_KEY}"
+  
+  # Key Pool (Required for Multiple Workers)
+  pool:
+    - api_key: "${BINANCE_API_KEY_1}"
+      secret: "${BINANCE_SECRET_KEY_1}"
+    - api_key: "${BINANCE_API_KEY_2}"
+      secret: "${BINANCE_SECRET_KEY_2}"
 
 swarm:
   max_concurrency: 5
@@ -122,6 +126,8 @@ swarm:
   risk_per_bot: 100.0  # Allocation in quote currency
 
 ```
+
+Update `config/strategies.json` with your pair settings. The worker will exit if the pair is missing or disabled.
 
 ### 3. Deployment
 

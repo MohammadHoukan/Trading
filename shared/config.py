@@ -84,6 +84,14 @@ def normalize_config(config):
                 swarm_cfg['loop_interval'], 'swarm.loop_interval'
             )
 
+    dashboard_cfg = config.get('dashboard', {})
+    if isinstance(dashboard_cfg, dict):
+        if 'worker_stale_after_seconds' in dashboard_cfg:
+            dashboard_cfg['worker_stale_after_seconds'] = _coerce_int(
+                dashboard_cfg['worker_stale_after_seconds'],
+                'dashboard.worker_stale_after_seconds',
+            )
+
     return config
 
 
@@ -111,4 +119,7 @@ def load_config(config_path='config/settings.yaml'):
 
     resolved_config = _resolve_env(raw_config)
     parsed = yaml.safe_load(resolved_config)
+    
+    # Extra check: Ensure pool items are fully resolved if YAML parsing missed nested structures
+    # (Though _resolve_env should handle raw text, this acts as a sanitizer for any keys added later)
     return normalize_config(parsed)

@@ -3,6 +3,19 @@ exchange:
   mode: testnet  # 'live' or 'testnet'
   api_key: "${BINANCE_API_KEY}"
   secret: "${BINANCE_SECRET_KEY}"
+  
+  # Dynamic Key Pool for Workers
+  pool:
+    - api_key: "${BINANCE_API_KEY_1}"
+      secret: "${BINANCE_SECRET_KEY_1}"
+    - api_key: "${BINANCE_API_KEY_2}"
+      secret: "${BINANCE_SECRET_KEY_2}"
+    - api_key: "${BINANCE_API_KEY_3}"
+      secret: "${BINANCE_SECRET_KEY_3}"
+    - api_key: "${BINANCE_API_KEY_4}"
+      secret: "${BINANCE_SECRET_KEY_4}"
+    - api_key: "${BINANCE_API_KEY_5}"
+      secret: "${BINANCE_SECRET_KEY_5}"
 
 swarm:
   base_currency: "${BASE_CURRENCY:-USDT}"
@@ -18,3 +31,6 @@ redis:
     command: "swarm:cmd"
     status: "swarm:status"
     market_data: "swarm:market"
+
+dashboard:
+  worker_stale_after_seconds: ${WORKER_STALE_AFTER_SECONDS:-30}

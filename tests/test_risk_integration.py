@@ -41,10 +41,11 @@ class TestRiskEngineIntegration(unittest.TestCase):
 
     def test_orchestrator_reaction(self):
         # Mock Orchestrator
-        orch = Orchestrator()
+        orch = Orchestrator.__new__(Orchestrator)
         orch.config = {'redis': {'channels': {'command': 'cmd'}}} # Minimally sufficient
         orch.bus = MagicMock()
         orch.risk_engine = self.risk_engine
+        orch.logger = MagicMock()
         
         # Limits: Global 500.
         
@@ -56,6 +57,54 @@ class TestRiskEngineIntegration(unittest.TestCase):
         
         # Expectation: Broadcast STOP
         orch.bus.publish.assert_called_with('cmd', {'command': 'STOP', 'target': 'all'})
+
+    def test_orchestrator_rejects_excess_worker_updates(self):
+        orch = Orchestrator.__new__(Orchestrator)
+        orch.config = {'redis': {'channels': {'command': 'cmd'}}}
+        orch.bus = MagicMock()
+        orch.risk_engine = MagicMock()
+        orch.logger = MagicMock()
+        orch.rejected_workers = set()
+
+        orch.risk_engine.register_worker.return_value = False
+
+        msg = {
+            'worker_id': 'w_rejected',
+            'symbol': 'ETH/USDT',
+            'exposure': 75.0,
+        }
+
+        orch.handle_worker_update(msg)
+
+        orch.risk_engine.update_exposure.assert_not_called()
+        orch.bus.hset.assert_not_called()
+        orch.bus.publish.assert_called_once_with('cmd', {'command': 'STOP', 'target': 'w_rejected'})
+
+        # Duplicate updates for the same worker should not spam STOP repeatedly.
+        orch.handle_worker_update(msg)
+        orch.bus.publish.assert_called_once()
+
+    def test_orchestrator_logs_on_worker_snapshot_failure(self):
+        orch = Orchestrator.__new__(Orchestrator)
+        orch.config = {'redis': {'channels': {'command': 'cmd'}}}
+        orch.bus = MagicMock()
+        orch.risk_engine = MagicMock()
+        orch.logger = MagicMock()
+        orch.rejected_workers = set()
+
+        orch.risk_engine.register_worker.return_value = True
+        orch.bus.hset.return_value = False
+
+        msg = {
+            'worker_id': 'w1',
+            'symbol': 'SOL/USDT',
+            'exposure': 12.5,
+        }
+        orch.handle_worker_update(msg)
+
+        orch.risk_engine.update_exposure.assert_called_once_with('w1', 12.5)
+        orch.bus.hset.assert_called_once()
+        orch.logger.error.assert_called_once_with("Failed to persist worker snapshot for w1")
 
 if __name__ == '__main__':
     unittest.main()

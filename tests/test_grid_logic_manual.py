@@ -1,6 +1,6 @@
 
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 import sys
 import os
 import json
@@ -14,6 +14,7 @@ class MockOrderManager:
     def __init__(self):
         self.orders = {}
         self.id_counter = 0
+        self.fail_cancel_ids = set()
 
     def fetch_ticker(self, symbol):
         return {'last': 20.0}
@@ -42,11 +43,28 @@ class MockOrderManager:
     def fetch_order(self, order_id, symbol):
         return self.orders.get(order_id)
 
+    def cancel_order(self, order_id, symbol):
+        if order_id in self.fail_cancel_ids:
+            raise RuntimeError(f"cancel failed for {order_id}")
+        if order_id in self.orders:
+            self.orders[order_id]['status'] = 'canceled'
+        return self.orders.get(order_id)
+
     # Helper to simulate fill
     def fill_order(self, order_id):
         if order_id in self.orders:
             self.orders[order_id]['status'] = 'closed'
             self.orders[order_id]['filled'] = self.orders[order_id]['amount']
+
+    def close_without_fill(self, order_id):
+        if order_id in self.orders:
+            self.orders[order_id]['status'] = 'closed'
+            self.orders[order_id]['filled'] = 0.0
+
+    def expire_order(self, order_id):
+        if order_id in self.orders:
+            self.orders[order_id]['status'] = 'expired'
+            self.orders[order_id]['filled'] = 0.0
 
 class TestGridLogic(unittest.TestCase):
     def setUp(self):
@@ -61,6 +79,25 @@ class TestGridLogic(unittest.TestCase):
                 "stop_loss": 5.0
             }
         }
+
+        self.config = {
+            'exchange': {
+                'name': 'binance',
+                'mode': 'testnet',
+                'api_key': 'k',
+                'secret': 's',
+            },
+            'redis': {
+                'host': 'localhost',
+                'port': 6379,
+                'db': 0,
+                'channels': {'command': 'cmd', 'status': 'stat'},
+            },
+            'swarm': {},
+        }
+        self.config_patch = patch('workers.grid_bot.load_config', return_value=self.config)
+        self.config_patch.start()
+        self.addCleanup(self.config_patch.stop)
         
         # Override _load_strategy_params to return our test strategy
         GridBot._load_strategy_params = MagicMock(return_value=self.strategy['SOL/USDT'])
@@ -153,6 +190,54 @@ class TestGridLogic(unittest.TestCase):
         # Check if we have a Buy at 20.0
         buy_20 = [o for o in open_orders if o['price'] == 20.0 and o['side'] == 'buy']
         self.assertTrue(len(buy_20) > 0, "Should have placed a Buy at 20.0")
+
+    def test_closed_without_fill_does_not_rebalance_or_change_inventory(self):
+        self.bot.place_initial_orders(20.0)
+        order = next(
+            o for o in self.bot.order_manager.fetch_open_orders("SOL/USDT")
+            if o['price'] == 15.0 and o['side'] == 'buy'
+        )
+
+        self.bot.order_manager.close_without_fill(order['id'])
+        self.bot.check_orders()
+
+        open_orders = self.bot.order_manager.fetch_open_orders("SOL/USDT")
+        sell_20 = [o for o in open_orders if o['price'] == 20.0 and o['side'] == 'sell']
+
+        self.assertEqual(self.bot.inventory, 0.0)
+        self.assertEqual(self.bot.realized_profit, 0.0)
+        self.assertEqual(len(sell_20), 0)
+        self.assertNotIn(order['id'], self.bot.active_orders)
+
+    def test_expired_order_removed_from_tracking(self):
+        self.bot.place_initial_orders(20.0)
+        order = next(
+            o for o in self.bot.order_manager.fetch_open_orders("SOL/USDT")
+            if o['price'] == 15.0 and o['side'] == 'buy'
+        )
+
+        self.bot.order_manager.expire_order(order['id'])
+        self.bot.check_orders()
+
+        self.assertNotIn(order['id'], self.bot.active_orders)
+        tracked_ids = [
+            tracked['id']
+            for grid in self.bot.grids
+            for tracked in grid['orders']
+        ]
+        self.assertNotIn(order['id'], tracked_ids)
+
+    def test_cancel_open_orders_keeps_failed_cancels_tracked(self):
+        self.bot.place_initial_orders(20.0)
+        open_orders = self.bot.order_manager.fetch_open_orders("SOL/USDT")
+        keep_open = next(o for o in open_orders if o['price'] == 10.0 and o['side'] == 'buy')
+        self.bot.order_manager.fail_cancel_ids.add(keep_open['id'])
+
+        self.bot.cancel_open_orders()
+
+        remaining_open_ids = {o['id'] for o in self.bot.order_manager.fetch_open_orders("SOL/USDT")}
+        self.assertEqual(remaining_open_ids, {keep_open['id']})
+        self.assertIn(keep_open['id'], self.bot.active_orders)
 
 if __name__ == '__main__':
     unittest.main()
