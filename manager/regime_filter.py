@@ -30,6 +30,7 @@ class RegimeFilter:
             'ma_distance_threshold': regime_cfg.get('ma_distance_threshold', 0.02),  # 2% from MA
             'fill_rate_threshold': regime_cfg.get('fill_rate_threshold', 0.3),  # 30% minimum
         }
+        self.default_trending_scale = regime_cfg.get('trending_scale', 0.5)
         self.timeframe = regime_cfg.get('timeframe', '1h')
         self.default_symbol = regime_cfg.get('symbol', 'SOL/USDT')
         
@@ -56,8 +57,23 @@ class RegimeFilter:
         """Get thresholds for a specific symbol (with per-symbol overrides)."""
         thresholds = self.default_thresholds.copy()
         if symbol in self.per_symbol:
-            thresholds.update(self.per_symbol[symbol])
+            overrides = self.per_symbol[symbol]
+            for key in self.default_thresholds:
+                if key in overrides:
+                    thresholds[key] = overrides[key]
         return thresholds
+
+    def get_trending_scale(self, symbol):
+        """Get trending exposure scale for a symbol, with per-symbol override support."""
+        scale = self.default_trending_scale
+        if symbol in self.per_symbol:
+            scale = self.per_symbol[symbol].get('trending_scale', scale)
+        try:
+            scale = float(scale)
+        except (TypeError, ValueError):
+            scale = 0.5
+        # Clamp to sane range [0.05, 1.0] to avoid zero/negative order sizes.
+        return max(0.05, min(1.0, scale))
 
     def analyze_market(self, symbol=None):
         """
@@ -169,13 +185,7 @@ class RegimeFilter:
             else:
                 result['regime'] = 'TRENDING'
                 result['recommendation'] = 'REDUCE_EXPOSURE'
-                trending_scale = self.config.get('regime', {}).get('trending_scale', 0.5)
-                try:
-                    trending_scale = float(trending_scale)
-                except (TypeError, ValueError):
-                    trending_scale = 0.5
-                # Clamp to sane range [0.05, 1.0] to avoid zero/negative order sizes.
-                result['scale'] = max(0.05, min(1.0, trending_scale))
+                result['scale'] = self.get_trending_scale(symbol)
             
             self.logger.info(
                 f"Regime [{symbol}]: {result['regime']} (score={result['score']}) "

@@ -177,7 +177,10 @@ class TestWorkerManagerLifecycle(unittest.TestCase):
 
         # 2) Manager sends STOP (stream+pubsub) on risk breach.
         orch.perform_risk_checks()
-        self.assertTrue(orch.stop_broadcast_sent)
+        stream_messages = shared_bus.streams.get('swarm:commands', [])
+        self.assertGreaterEqual(len(stream_messages), 1)
+        self.assertEqual(stream_messages[-1][1].get('command'), 'STOP')
+        self.assertEqual(stream_messages[-1][1].get('target'), 'all')
 
         # 3) Worker consumes STOP from stream and publishes terminal status.
         bot._check_stream_commands()

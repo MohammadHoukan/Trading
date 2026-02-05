@@ -29,7 +29,7 @@ class Orchestrator:
         self.regime_by_symbol = {}  # {symbol: regime} for multi-symbol awareness
         self.last_regime_check = 0
         self.rejected_workers = set()
-        self.stop_broadcast_sent = False
+        self.last_stop_time = 0.0
         # Track workers paused by drawdown logic so recovery resumes only those workers.
         self.drawdown_paused_workers = set()
         self.last_drawdown_action = DrawdownAction.NORMAL
@@ -119,6 +119,8 @@ class Orchestrator:
 
     def perform_risk_checks(self):
         # Backward compatibility for tests that instantiate Orchestrator via __new__.
+        if not hasattr(self, 'last_stop_time'):
+            self.last_stop_time = 0.0
         if not hasattr(self, 'drawdown_paused_workers'):
             self.drawdown_paused_workers = set()
         if not hasattr(self, 'last_drawdown_action'):
@@ -129,29 +131,19 @@ class Orchestrator:
         self.logger.debug(f"Risk Status: {status}")
 
         # 1. Check capital allocation limits
-        if status['total_allocated'] > self.risk_engine.max_global_capital:
-            # Fix #1: Retry STOP command while breach persists (don't silence after one attempt)
-            self.logger.critical("GLOBAL RISK LIMIT EXCEEDED! STOPPING ALL WORKERS.")
-            if self.broadcast_command('STOP'):
-                self.stop_broadcast_sent = True
-            else:
-                self.logger.error("Failed to broadcast STOP command! Will retry next tick.")
-        else:
-            if self.stop_broadcast_sent:
-                self.logger.info("Global risk normalization. Resetting STOP flag.")
-                self.stop_broadcast_sent = False
+        is_global_risk = status['total_allocated'] > self.risk_engine.max_global_capital
+        
+        if is_global_risk:
+            self.logger.critical("GLOBAL RISK LIMIT EXCEEDED!")
+            self._ensure_stopped()
 
         # 2. Check drawdown limits
         drawdown_action = self.risk_engine.check_drawdown()
 
         if drawdown_action == DrawdownAction.HALT_ALL:
             # Critical drawdown - stop all trading
-            if not self.stop_broadcast_sent:
-                self.logger.critical("DRAWDOWN HALT: Stopping all workers due to excessive drawdown!")
-                if self.broadcast_command('STOP'):
-                    self.stop_broadcast_sent = True
-                else:
-                    self.logger.error("Failed to broadcast STOP for drawdown halt! Will retry next tick.")
+            self.logger.critical("DRAWDOWN HALT: Stopping all workers due to excessive drawdown!")
+            self._ensure_stopped()
 
         elif drawdown_action == DrawdownAction.REDUCE_EXPOSURE:
             # Elevated drawdown - pause new orders but don't close positions
@@ -300,6 +292,19 @@ class Orchestrator:
                 self.logger.info(f"Resumed {resumed_count} workers after drawdown recovery")
         except Exception as e:
             self.logger.error(f"Failed to resume drawdown-paused workers: {e}")
+
+    def _ensure_stopped(self):
+        """
+        Continuously assert the STOP command while a critical condition persists.
+        Throttled to once per second to avoid flooding.
+        """
+        now = time.time()
+        if now - self.last_stop_time >= 1.0:
+            self.logger.warning("Asserting GLOBAL STOP due to critical risk state.")
+            if self.broadcast_command('STOP'):
+                self.last_stop_time = now
+            else:
+                self.logger.error("Failed to broadcast STOP assertion! (Will retry)")
 
     def broadcast_command(self, cmd, target='all'):
         """Broadcast command to workers. Returns True on success, False on failure."""

@@ -1,9 +1,10 @@
 
 import unittest
 import json
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 import sys
 import os
+
 
 # Path hack
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
@@ -47,7 +48,7 @@ class TestRiskEngineIntegration(unittest.TestCase):
         orch.bus = MagicMock()
         orch.risk_engine = self.risk_engine
         orch.logger = MagicMock()
-        orch.stop_broadcast_sent = False
+        orch.last_stop_time = 0.0
         
         # Limits: Global 500.
         
@@ -115,29 +116,32 @@ class TestRiskEngineIntegration(unittest.TestCase):
         orch.bus = MagicMock()
         orch.risk_engine = self.risk_engine
         orch.logger = MagicMock()
-        orch.stop_broadcast_sent = False
+        orch.last_stop_time = 0.0  # Initialize new attribute
         
         # 1. Breach Limits
         orch.risk_engine.update_exposure('w1', 600.0) # Limit is 500
         
         # 2. First Check -> Should Broadcast
-        orch.bus.publish.return_value = True
-        orch.perform_risk_checks()
-        orch.bus.publish.assert_called_with('cmd', {'command': 'STOP', 'target': 'all'})
-        self.assertTrue(orch.stop_broadcast_sent)
+        with patch('time.time', return_value=1000.0):
+            orch.bus.publish.return_value = True
+            orch.perform_risk_checks()
+            orch.bus.publish.assert_called_with('cmd', {'command': 'STOP', 'target': 'all'})
+            self.assertEqual(orch.last_stop_time, 1000.0)
         
-        # Reset mock to check next call
+        # Reset mock
         orch.bus.publish.reset_mock()
         
-        # 3. Second Check (Still Breached) -> Should Broadcast AGAIN (Fix #1)
-        orch.perform_risk_checks()
-        orch.bus.publish.assert_called_with('cmd', {'command': 'STOP', 'target': 'all'})
+        # 3. Second Check (Still Breached) -> Should Broadcast AGAIN if time passed
+        with patch('time.time', return_value=1001.1):
+            orch.perform_risk_checks()
+            orch.bus.publish.assert_called_with('cmd', {'command': 'STOP', 'target': 'all'})
 
     def test_broadcast_command_succeeds_when_stream_write_succeeds(self):
         orch = Orchestrator.__new__(Orchestrator)
         orch.config = {'redis': {'channels': {'command': 'cmd'}}}
         orch.bus = MagicMock()
         orch.logger = MagicMock()
+        orch.last_stop_time = 0.0
 
         orch.bus.xadd.return_value = "1-0"
         orch.bus.publish.return_value = False
@@ -232,20 +236,27 @@ class TestRiskEngineIntegration(unittest.TestCase):
         orch.config = {'redis': {'channels': {'command': 'cmd'}}}
         orch.bus = MagicMock()
         orch.logger = MagicMock()
-        orch.stop_broadcast_sent = False
+        orch.last_stop_time = 0.0
         orch.drawdown_paused_workers = set()
         orch.last_drawdown_action = DrawdownAction.NORMAL
         orch.risk_engine = MagicMock()
         orch.risk_engine.max_global_capital = 500.0
         orch.risk_engine.get_status.return_value = {'total_allocated': 0.0}
         orch.risk_engine.check_drawdown.return_value = DrawdownAction.HALT_ALL
-        orch.broadcast_command = MagicMock(return_value=False)
+        orch.broadcast_command = MagicMock(return_value=True)
 
-        orch.perform_risk_checks()
-        self.assertFalse(orch.stop_broadcast_sent)
+        with patch('time.time', return_value=1000.0):
+            orch.perform_risk_checks()
         orch.broadcast_command.assert_called_once_with('STOP')
 
-        orch.perform_risk_checks()
+        # Throttled - should NOT call again
+        with patch('time.time', return_value=1000.5):
+            orch.perform_risk_checks()
+        self.assertEqual(orch.broadcast_command.call_count, 1)
+
+        # Time passed - should call again
+        with patch('time.time', return_value=1001.1):
+            orch.perform_risk_checks()
         self.assertEqual(orch.broadcast_command.call_count, 2)
 
     def test_drawdown_recovery_resumes_only_workers_paused_by_drawdown(self):

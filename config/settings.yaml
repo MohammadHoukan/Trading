@@ -23,6 +23,16 @@ swarm:
   risk_per_bot: ${RISK_PER_BOT:-100.0}
   loop_interval: ${LOOP_INTERVAL:-10}
 
+regime:
+  # Default exposure scale during TRENDING regimes
+  trending_scale: 0.5
+  # Per-symbol overrides tuned from regime-policy sweep
+  per_symbol:
+    ETH/USDT:
+      trending_scale: 0.25
+    SOL/USDT:
+      trending_scale: 0.75
+
 redis:
   host: "${REDIS_HOST:-localhost}"
   port: ${REDIS_PORT:-6379}

@@ -74,6 +74,58 @@ class TestRegimeIntegration(unittest.TestCase):
         self.assertEqual(analysis['regime'], 'RANGING')
         self.assertEqual(analysis['recommendation'], 'RUN')
 
+    def test_regime_logic_trending_uses_per_symbol_scale_override(self):
+        cfg = {
+            'exchange': {'name': 'binance', 'mode': 'testnet', 'api_key': 'k', 'secret': 's'},
+            'regime': {
+                'adx_threshold': 25.0,
+                'trending_scale': 0.5,
+                'per_symbol': {
+                    'SOL/USDT': {'trending_scale': 0.75},
+                },
+            },
+            'redis': {'channels': {'command': 'cmd', 'status': 'stat'}},
+            'swarm': {},
+        }
+
+        rf = RegimeFilter(cfg)
+        rf.data_source = MagicMock()
+        rf.data_source.exchange.fetch_ohlcv.return_value = [[0, 1, 2, 3, 4, 5]] * 100
+        rf._get_fill_rate = MagicMock(return_value=None)
+
+        real_df = pd.DataFrame
+        real_series = pd.Series
+
+        class FakeTA:
+            def adx(self, *args, **kwargs):
+                return real_df({'ADX_14': [80.0]})
+
+            def atr(self, *args, **kwargs):
+                return real_series([20.0])
+
+        class FakeDF:
+            def __init__(self):
+                self.ta = FakeTA()
+                self._close = real_series([100.0] * 99 + [150.0])
+                self._high = self._close + 1
+                self._low = self._close - 1
+
+            def __getitem__(self, key):
+                if key == 'close':
+                    return self._close
+                if key == 'high':
+                    return self._high
+                if key == 'low':
+                    return self._low
+                raise KeyError(key)
+
+        with patch('manager.regime_filter.pd.DataFrame', return_value=FakeDF()):
+            analysis = rf.analyze_market('SOL/USDT')
+
+        self.assertEqual(analysis['regime'], 'TRENDING')
+        self.assertEqual(analysis['recommendation'], 'REDUCE_EXPOSURE')
+        self.assertAlmostEqual(analysis['scale'], 0.75, places=6)
+
     def test_orchestrator_reaction(self):
         orch = Orchestrator.__new__(Orchestrator)
         orch.config = self.config
