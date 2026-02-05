@@ -1,203 +1,132 @@
 # 🌐 Spot-Grid-Swarm
 
-**A Distributed, Multi-Agent Trading System for Spot Market Grid Strategies.**
+**A High-Performance, Distributed Multi-Agent Trading System for Spot Market Grid Strategies.**
+
+---
 
 ## 📖 Overview
 
-**Spot-Grid-Swarm** is a Python-based trading architecture designed to orchestrate a cluster of independent grid trading bots.
+**Spot-Grid-Swarm** is an institutional-grade trading architecture designed to orchestrate a cluster of independent grid trading bots ("Workers") from a centralized "Manager". It bridges the gap between simple grid bots and professional multi-agent systems.
 
-This system is engineered with strict **Risk & Asset Constraints**:
+### 🛡️ Core Constraints
+1. **Spot Market Only:** CCXT wrapper prevents any interaction with Futures/Derivatives.
+2. **Zero Leverage:** 1:1 capital basis (no margin borrowing).
+3. **Long-Only:** Accumulates and sells the underlying asset without short-selling risk.
+4. **Execution Drag Awareness:** Backtester simulates slippage, spreads, and partial fills to ensure "backtest truthfulness".
 
-1. **Spot Market Only:** No interaction with Futures, Options, or Derivatives.
-2. **Zero Leverage:** Operates strictly on a 1:1 capital basis (no margin borrowing).
-3. **Long-Only:** No short selling. The system focuses on accumulating and selling the underlying asset.
-
-It utilizes a **Hub-and-Spoke** architecture to manage concurrency, allowing multiple assets to be traded simultaneously while maintaining a global risk state. Grid execution is basic (initial placement + rebalancing), while risk controls remain stubs.
+---
 
 ## 🏗 Architecture
 
-The system mimics a microservices pattern using **Redis Pub/Sub** for inter-process communication:
+The system utilizes a **Hub-and-Spoke** architecture with **Redis Streams** for reliable inter-process communication.
 
-* **👑 The Manager (Orchestrator):**
-* Subscribes to worker status updates and can broadcast commands (e.g., STOP).
-* Regime detection and risk checks are placeholders.
+### 👑 The Manager (Orchestrator)
+The "Brain" of the swarm. It doesn't trade directly but manages the health and logic of the workers.
+- **Per-Symbol Regime Detection:** Analyzes market conditions for each active pair independently.
+- **Composite Scoring:** Uses a weighted average of ADX (Trend), ATR (Volatility), MA Distance (Mean Reversion), and historical Fill Rate (Execution) to decide if a strategy should `RUN`, `HOLD`, or `PAUSE`.
+- **Global Risk Engine:** Enforces concurrency limits and global capital allocation thresholds.
 
+### 🐝 The Workers (Swarm)
+Independent processes spawned per trading pair.
+- **Dynamic Key Pool:** Prevents nonce collisions by claiming API keys from a Redis-locked pool.
+- **Rolling (Infinity) Grids:** Grid levels shift dynamically with price to prevent "trading out" of the range.
+- **Stop-Loss Protection:** Hard-coded price floor that cancels all orders and unregisters the bot.
+- **Watchdog:** Monitors connection health and stalls trading on stale price data.
 
-* **🐝 The Workers (Swarm):**
-* Independent processes spawned per trading pair (e.g., `SOL/USDT`, `ETH/USDT`).
-* **Dynamic Key Pool:** Workers "claim" a unique API Key from Redis at startup to prevent Nonce collisions.
-* Place initial grid orders and rebalance on fills (basic implementation).
+### 📡 The Bus (Redis)
+- **Messaging:** Uses Pub/Sub for low-latency broadcasts and Streams for reliable command delivery.
+- **State:** Stores worker snapshots and API key locks.
 
+---
 
-* **📡 The Bus (Redis):**
-* Facilitates low-latency messaging between Manager and Workers.
-* Used for command dispatch (Start/Stop) and status reporting.
+## 🎛 Regime Detection Logic
 
+The `RegimeFilter` computes a **Composite Score (0-100)**:
+- **Score ≥ 60 (RANGING):** Optimal for grid. Sends `RESUME` command.
+- **Score 40-60 (UNCERTAIN):** Sends `HOLD`. Keeps current execution state.
+- **Score < 40 (TRENDING):** High risk for grid. Sends `PAUSE` command to stall order placement.
 
+---
 
-## ⚙️ Core System Rules
+## 📊 Backtesting & Verification
 
-The following constraints are hard-coded into the `order_manager.py` logic:
+We support three levels of strategy validation:
 
-* **Rule 1: No Derivatives.** The API connector is forced to `defaultType: 'spot'`. Any request to a non-spot endpoint is rejected.
-* **Rule 2: No Borrowing.** Margin borrowing is disabled. *(Balance checking before orders is planned but not yet implemented.)*
-* **Rule 3: Inventory Management.** *(Stop-loss logic is planned but not yet implemented.)*
+### 1. Realistic Simulation
+The `ExecutionModel` simulates real-world frictions:
+- **Slippage:** Exponential distribution of fill prices moving against the bot.
+- **Spread:** Bid-ask simulation.
+- **Partial Fills:** beta-distribution of order fulfillment (30-100%).
 
-## 🛠 Tech Stack
+```bash
+# Run realistic backtest with Execution Drag enabled
+python3 -m backtest.runner --pair SOL/USDT --realistic
+```
 
-* **Language:** Python 3.10+
-* **Execution Engine:** `ccxt` (configured for Spot API)
-* **Message Broker:** Redis
-* **State Management:** SQLite (Local)
-* **Analysis:** `pandas`, `pandas_ta` (ADX/ATR calculation)
-* **Dashboard:** `Streamlit`
-* **Config:** `python-dotenv` for `.env` support
+### 2. Portfolio Backtesting
+Aggregate results across multiple concurrent strategies to see total correlation and capital drag.
+```bash
+python3 -m backtest.portfolio_runner --days 30 --capital 1000 --realistic
+```
+
+### 3. Parameter Optimization
+Run automated sweeps to find the "Sweet Spot" for grid spacing and capital allocation.
+
+---
 
 ## 📂 Project Structure
 
 ```bash
-spot-grid-swarm/
 ├── manager/
-│   └── orchestrator.py    # Main process; manages worker lifecycle
+│   ├── orchestrator.py    # Brain; manages heartbeats & targeted commands
+│   ├── regime_filter.py   # Composite signal analysis (ADX, ATR, MA, Fill Rate)
+│   └── risk_engine.py     # Capital & concurrency limits
 ├── workers/
-│   ├── grid_bot.py        # Individual worker logic
-│   └── order_manager.py   # CCXT wrapper with strict Spot-only rules
+│   ├── grid_bot.py        # execution engine; Key Pool & Rolling Grid support
+│   └── order_manager.py   # Strict Spot-only CCXT abstraction
 ├── shared/
-│   ├── config.py          # .env + ${VAR} config resolution and coercion
-│   ├── messaging.py       # Redis class wrappers
-│   └── database.py        # SQLite interface
+│   ├── messaging.py       # Redis Stream + Pub/Sub wrappers
+│   ├── database.py        # SQLite logger (live vs backtest isolation)
+│   └── config.py          # .env + ${VAR} resolution
+├── backtest/
+│   ├── simulator.py       # Core logic with rolling grid support
+│   ├── execution_model.py # Slippage/Spread simulation
+│   └── portfolio_runner.py# Multi-pair aggregator
 ├── config/
-│   ├── settings.yaml      # Exchange keys and system constants
-│   └── strategies.json    # Grid parameters (Upper/Lower limits) per pair
-├── tests/                 # Smoke and unit tests
-├── dashboard/             # Streamlit UI
-├── .agent/workflows/      # Agentic runbooks (setup/start)
-├── requirements.txt
-└── README.md
-
+│   ├── settings.yaml      # API Keys (Pool format) & System Limits
+│   └── strategies.json    # Grid parameters per pair
+└── dashboard/             # Streamlit-based Control Room
 ```
 
-## 🚀 Usage
+---
 
-### 1. Prerequisites
+## 🚀 Getting Started
 
-Ensure **Redis** is installed and running.
-
+### 1. Installation
 ```bash
-redis-server
-```
-
-**Install Dependencies (recommended in a venv):**
-
-```bash
-python3 -m venv venv
-source venv/bin/activate
+python3 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
 ```
 
 ### 2. Configuration
-
-Copy `.env.example` to `.env` and set your values:
-
-```bash
-cp .env.example .env
-```
-
-The system resolves `${VAR}` or `${VAR:-default}` in `config/settings.yaml` via `python-dotenv`.
-Numeric values (e.g., `REDIS_PORT`, `RISK_PER_BOT`) are coerced to `int/float` with validation.
-
-Example `config/settings.yaml`:
-
+Setup your `.env` and `config/settings.yaml`. Use the **API Key Pool** for distributed scaling:
 ```yaml
 exchange:
-  name: binance
-  mode: testnet  # Toggle 'live' for production
-  
-  # Key Pool (Required for Multiple Workers)
   pool:
-    - api_key: "${BINANCE_API_KEY_1}"
-      secret: "${BINANCE_SECRET_KEY_1}"
-    - api_key: "${BINANCE_API_KEY_2}"
-      secret: "${BINANCE_SECRET_KEY_2}"
-
-swarm:
-  max_concurrency: 5
-  base_currency: USDT
-  risk_per_bot: 100.0  # Allocation in quote currency
-
+    - api_key: "KEY_1"
+      secret: "SEC_1"
+    - api_key: "KEY_2"
+      secret: "SEC_2"
 ```
 
-Update `config/strategies.json` with your pair settings. The worker will exit if the pair is missing or disabled.
-
-### 3. Deployment
-
-**Start the Manager:**
-
-```bash
-python manager/orchestrator.py
-
-```
-
-**Spawn a Worker:**
-
-```bash
-python workers/grid_bot.py --pair SOL/USDT --grids 20
-
-```
-
-**Launch Dashboard:**
-
-```bash
-streamlit run dashboard/app.py
-
-```
-
-### 4. Backtesting
-
-**Run basic backtest (Fixed Grid):**
-```bash
-python -m backtest.runner --pair SOL/USDT --days 30 --grids 20
-```
-
-**Run Infinity Grid (Rolling) backtest:**
-```bash
-python -m backtest.runner --pair SOL/USDT --days 30 --grids 20 --rolling
-```
-
-**Run Portfolio Backtest (Aggregated):**
-```bash
-python -m backtest.portfolio_runner --days 30 --capital 1000
-```
-
-### 5. Workflows (Agentic Mode)
-
-This project includes pre-defined workflows for agentic IDEs in `.agent/workflows`:
-
-*   **Setup:** `setup.md` - Installs dependencies and checks configuration.
-*   **Start Manager:** `start_manager.md` - Launches the Orchestrator.
-*   **Start Worker:** `start_worker.md` - Spawns a grid bot (default SOL/USDT).
-*   **Start Dashboard:** `start_dashboard.md` - Starts the control room.
-
-### 6. Tests
-
-```bash
-pytest -q
-python tests/verify_env.py
-```
-
-## 🔒 Security Notes
-
-* The dashboard redacts config secrets (keys/tokens) before display.
-* `.env` is gitignored by default.
-
-## ⚠️ Risk Disclaimer
-
-*   **Market Risk:** This software automates trading. In trending bearish markets, grid strategies may result in unrealized losses (holding assets while price drops).
-*   **Software Status:** This is Alpha-grade engineering software. Thorough backtesting and Testnet validation are required before live deployment.
-*   **No Warranty:** The software is provided "as is", without warranty of any kind.
+### 3. Operations
+1. **Start Redis:** `redis-server`
+2. **Launch Manager:** `python3 manager/orchestrator.py`
+3. **Spawn Workers:** `python3 workers/grid_bot.py --pair SOL/USDT --grids 15`
+4. **View Dashboard:** `streamlit run dashboard/app.py`
 
 ---
 
-## 🤝 Contributing
-
-Pull requests are welcome. For major changes, please open an issue first to discuss the proposed architecture change.
+## 🤝 Contributing & License
+Alpha software. No warranty provided. Thorough backtesting required.
+For major changes, please open an issue or submit a PR with verification logs.

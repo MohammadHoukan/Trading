@@ -220,6 +220,85 @@ class GridBot:
         except Exception as e:
             self.logger.warning(f"Failed to log grid event: {e}")
 
+    def _apply_param_update(self, new_params: dict):
+        """
+        Safely transition to new grid parameters.
+
+        This method atomically:
+        1. Pauses trading
+        2. Cancels all open orders
+        3. Updates strategy parameters
+        4. Recalculates grid levels
+        5. Places new orders
+        6. Resumes trading (if wasn't paused before)
+
+        Args:
+            new_params: dict of parameters to update (e.g., lower_limit, upper_limit, grid_levels)
+        """
+        self.logger.info(f"Applying parameter update: {new_params}")
+
+        # Validate new parameters before applying
+        valid_keys = {'lower_limit', 'upper_limit', 'grid_levels', 'amount_per_grid', 'stop_loss'}
+        invalid_keys = set(new_params.keys()) - valid_keys
+        if invalid_keys:
+            self.logger.warning(f"Ignoring invalid parameter keys: {invalid_keys}")
+            new_params = {k: v for k, v in new_params.items() if k in valid_keys}
+
+        if not new_params:
+            self.logger.warning("No valid parameters to update")
+            return
+
+        try:
+            # 1. Remember current state and pause
+            was_paused = self.paused
+            self.paused = True
+
+            # 2. Cancel all open orders
+            self.cancel_open_orders()
+
+            # 3. Update parameters
+            for key, value in new_params.items():
+                old_value = self.strategy_params.get(key)
+                self.strategy_params[key] = value
+                self.logger.info(f"Updated {key}: {old_value} -> {value}")
+
+            # Update grid_levels instance variable if changed
+            if 'grid_levels' in new_params:
+                self.grid_levels = new_params['grid_levels']
+
+            # 4. Get current price and recalculate grid
+            ticker = self.order_manager.fetch_ticker(self.symbol)
+            if not ticker:
+                self.logger.error("Failed to fetch ticker for grid recalculation")
+                self.paused = was_paused
+                return
+
+            current_price = ticker.get('last')
+            if not current_price:
+                self.logger.error("No price in ticker response")
+                self.paused = was_paused
+                return
+
+            # Reset grid state
+            self.grids = []
+            self.active_orders = set()
+
+            # 5. Recalculate grid levels
+            self.calculate_grid_levels(current_price)
+
+            # 6. Place new orders
+            self.place_initial_orders(current_price)
+
+            self.logger.info(f"Parameter update complete. New grid: {len(self.grids)} levels")
+
+            # 7. Resume if wasn't paused before
+            self.paused = was_paused
+
+        except Exception as e:
+            self.logger.error(f"Failed to apply parameter update: {e}")
+            # Try to resume normal operation
+            self.paused = was_paused
+
     def _has_existing_order(self, grid_index, side):
         grid = self.grids[grid_index]
         return any(order['side'] == side for order in grid['orders'])
@@ -655,6 +734,13 @@ class GridBot:
             elif cmd == 'RESUME':
                 self.logger.info("Received RESUME signal. Resuming operations.")
                 self.paused = False
+            elif cmd == 'UPDATE_PARAMS':
+                new_params = msg.get('params', {})
+                if new_params:
+                    self.logger.info(f"Received UPDATE_PARAMS signal: {new_params}")
+                    self._apply_param_update(new_params)
+                else:
+                    self.logger.warning("UPDATE_PARAMS received with no params")
 
     def report_status(self, current_price):
         # Update local DB

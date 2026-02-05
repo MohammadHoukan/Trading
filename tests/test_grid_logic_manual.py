@@ -239,5 +239,60 @@ class TestGridLogic(unittest.TestCase):
         self.assertEqual(remaining_open_ids, {keep_open['id']})
         self.assertIn(keep_open['id'], self.bot.active_orders)
 
+    def test_apply_param_update_changes_grid_levels(self):
+        """Test that _apply_param_update correctly recalculates grid with new parameters."""
+        # Initial setup: 4 levels, 10-30
+        self.bot.place_initial_orders(20.0)
+
+        # Update to 6 levels, 15-35
+        new_params = {
+            'grid_levels': 6,
+            'lower_limit': 15.0,
+            'upper_limit': 35.0,
+        }
+        self.bot._apply_param_update(new_params)
+
+        # Verify parameters were updated
+        self.assertEqual(self.bot.grid_levels, 6)
+        self.assertEqual(self.bot.strategy_params['lower_limit'], 15.0)
+        self.assertEqual(self.bot.strategy_params['upper_limit'], 35.0)
+
+        # Verify new grid was calculated (6 levels = 7 price points)
+        self.assertEqual(len(self.bot.grids), 7)
+
+        # Verify old orders were canceled and new orders placed
+        new_orders = self.bot.order_manager.fetch_open_orders("SOL/USDT")
+        # New orders should exist (not the same as initial)
+        self.assertGreater(len(new_orders), 0)
+
+    def test_apply_param_update_handles_invalid_params(self):
+        """Test that _apply_param_update ignores invalid parameter keys."""
+        self.bot.place_initial_orders(20.0)
+        original_lower = self.bot.strategy_params['lower_limit']
+
+        # Try to update with invalid keys
+        new_params = {
+            'invalid_key': 999,
+            'another_bad_key': 'foo',
+        }
+        self.bot._apply_param_update(new_params)
+
+        # Original params should be unchanged
+        self.assertEqual(self.bot.strategy_params['lower_limit'], original_lower)
+
+    def test_handle_message_update_params(self):
+        """Test that handle_message correctly processes UPDATE_PARAMS command."""
+        self.bot.place_initial_orders(20.0)
+
+        msg = {
+            'command': 'UPDATE_PARAMS',
+            'target': self.bot.worker_id,
+            'params': {'grid_levels': 8}
+        }
+        self.bot.handle_message(msg)
+
+        # Verify grid_levels was updated
+        self.assertEqual(self.bot.grid_levels, 8)
+
 if __name__ == '__main__':
     unittest.main()

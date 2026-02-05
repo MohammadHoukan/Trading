@@ -213,6 +213,63 @@ class Orchestrator:
 
         return stream_success or pubsub_success
 
+    def update_worker_params(self, worker_id: str, params: dict):
+        """
+        Send parameter update to a specific worker.
+
+        Args:
+            worker_id: Target worker ID
+            params: Dict of parameters to update (e.g., lower_limit, upper_limit, grid_levels)
+
+        Returns:
+            True on success, False on failure
+        """
+        if not params:
+            self.logger.warning("update_worker_params called with empty params")
+            return False
+
+        message = {
+            'command': 'UPDATE_PARAMS',
+            'target': worker_id,
+            'params': params
+        }
+
+        stream_id = self.bus.xadd(COMMAND_STREAM, message)
+        if stream_id:
+            self.logger.info(f"Sent UPDATE_PARAMS to {worker_id}: {params}")
+            return True
+        else:
+            self.logger.error(f"Failed to send UPDATE_PARAMS to {worker_id}")
+            return False
+
+    def update_symbol_params(self, symbol: str, params: dict):
+        """
+        Send parameter update to all workers trading a specific symbol.
+
+        Args:
+            symbol: Trading pair (e.g., 'SOL/USDT')
+            params: Dict of parameters to update
+
+        Returns:
+            Number of workers updated
+        """
+        updated = 0
+        try:
+            worker_data = self.bus.hgetall('workers:data')
+            for worker_id, data in worker_data.items():
+                try:
+                    w = json.loads(data)
+                    if w.get('symbol') == symbol and w.get('status') in ('RUNNING', 'PAUSED'):
+                        if self.update_worker_params(worker_id, params):
+                            updated += 1
+                except Exception:
+                    pass
+        except Exception as e:
+            self.logger.error(f"Failed to update params for {symbol}: {e}")
+
+        self.logger.info(f"Updated {updated} workers for {symbol}")
+        return updated
+
     def shutdown(self):
         self.logger.info("Shutting down... sending STOP to all workers.")
         self.broadcast_command('STOP')
