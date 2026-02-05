@@ -61,7 +61,8 @@ class GridSimulator:
         rolling: bool = False,  # Enable rolling/infinity grids
         trend_filter_period: Optional[int] = None,  # SMA period for trend filter (e.g., 50)
         database = None,  # Optional: Shared Database instance for logging
-        symbol: str = "SOL/USDT" # Symbol for logging
+        symbol: str = "SOL/USDT", # Symbol for logging
+        execution_model = None  # Optional: ExecutionModel for realistic fills
     ):
         """
         Initialize grid simulator.
@@ -88,6 +89,7 @@ class GridSimulator:
         self.rolling = rolling
         self.database = database
         self.symbol = symbol
+        self.execution_model = execution_model
         
         # Calculate grid prices
         self.grid_step = (upper_limit - lower_limit) / grid_levels
