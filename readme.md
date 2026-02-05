@@ -152,7 +152,24 @@ streamlit run dashboard/app.py
 
 ```
 
-### 4. Workflows (Agentic Mode)
+### 4. Backtesting
+
+**Run basic backtest (Fixed Grid):**
+```bash
+python -m backtest.runner --pair SOL/USDT --days 30 --grids 20
+```
+
+**Run Infinity Grid (Rolling) backtest:**
+```bash
+python -m backtest.runner --pair SOL/USDT --days 30 --grids 20 --rolling
+```
+
+**Run Portfolio Backtest (Aggregated):**
+```bash
+python -m backtest.portfolio_runner --days 30 --capital 1000
+```
+
+### 5. Workflows (Agentic Mode)
 
 This project includes pre-defined workflows for agentic IDEs in `.agent/workflows`:
 
@@ -161,7 +178,7 @@ This project includes pre-defined workflows for agentic IDEs in `.agent/workflow
 *   **Start Worker:** `start_worker.md` - Spawns a grid bot (default SOL/USDT).
 *   **Start Dashboard:** `start_dashboard.md` - Starts the control room.
 
-### 5. Tests
+### 6. Tests
 
 ```bash
 pytest -q
