@@ -13,8 +13,14 @@ from workers.order_manager import OrderManager
 from shared.messaging import RedisBus
 from shared.database import Database
 from shared.config import load_config, get_redis_params
+from shared.rate_limiter import RateLimiter
 import hashlib
 import threading
+
+# Constants
+STALE_DATA_THRESHOLD_SECONDS = 15
+COMMAND_STREAM = 'swarm:commands'
+COMMAND_GROUP = 'workers'
 
 class GridBot:
     def __init__(self, symbol, grids, config_path='config/settings.yaml'):
@@ -105,6 +111,14 @@ class GridBot:
         self.avg_cost = 0.0
         self.realized_profit = 0.0
         self.paused = False
+        
+        # Production safety features
+        self.rate_limiter = RateLimiter(self.bus, max_requests=8, window_seconds=1)
+        self.last_price_update = time.time()
+        self.stop_loss_triggered = False
+        
+        # Setup Redis Streams consumer group for reliable commands
+        self.bus.create_consumer_group(COMMAND_STREAM, COMMAND_GROUP, start_id='$')
 
     def _renew_lock_loop(self):
         """Background thread to keep the API Key lock alive."""
@@ -339,14 +353,30 @@ class GridBot:
                 if pubsub is None:
                     pubsub = self.bus.subscribe(self.config['redis']['channels']['command'])
 
-                # 1. Check for messages
+                # 1. Check for commands via Redis Streams (reliable) + Pub/Sub (legacy)
+                self._check_stream_commands()
                 msg = self.bus.get_message(pubsub)
                 if msg:
                     self.handle_message(msg)
 
-                # 2. Main Logic Tick (Mock)
+                # 2. Rate limit check before exchange API call
+                if not self.rate_limiter.acquire(timeout=5.0):
+                    self.logger.warning("Rate limit exhausted, skipping tick")
+                    time.sleep(1)
+                    continue
+
+                # 3. Fetch current price
                 ticker = self.order_manager.fetch_ticker(self.symbol)
                 last_price = ticker['last']
+                self.last_price_update = time.time()
+                
+                # 4. Watchdog: Check for stale data
+                if self._check_stale_data():
+                    continue
+                
+                # 5. Stop-Loss Check (CRITICAL SAFETY)
+                if self._check_stop_loss(last_price):
+                    continue  # Bot is stopping
                 
                 if not self.paused:
                     # Logic: If no grids, initialize
@@ -356,7 +386,7 @@ class GridBot:
                 # Logic: Monitor orders (paused mode skips rebalancing)
                 self.check_orders(allow_rebalance=not self.paused)
 
-                # 3. Report Status
+                # 6. Report Status
                 self.report_status(last_price)
                 
                 time.sleep(2) # Throttle loop
@@ -365,6 +395,63 @@ class GridBot:
                 self.logger.error(f"Error in main loop: {e}")
                 pubsub = None
                 time.sleep(5)
+
+    def _check_stream_commands(self):
+        """Check Redis Streams for reliable command delivery."""
+        try:
+            messages = self.bus.xreadgroup(
+                COMMAND_GROUP, self.worker_id, COMMAND_STREAM, 
+                count=10, block=0  # Non-blocking
+            )
+            for msg_id, fields in messages:
+                self.handle_message(fields)
+                self.bus.xack(COMMAND_STREAM, COMMAND_GROUP, msg_id)
+        except Exception as e:
+            self.logger.error(f"Error reading stream commands: {e}")
+
+    def _check_stale_data(self) -> bool:
+        """
+        Watchdog: Detect stale price data.
+        Returns True if data is stale and we should skip this tick.
+        """
+        stale_seconds = time.time() - self.last_price_update
+        if stale_seconds > STALE_DATA_THRESHOLD_SECONDS:
+            self.logger.critical(
+                f"STALE DATA DETECTED! Last update was {stale_seconds:.1f}s ago. "
+                "Possible connection issue."
+            )
+            # Don't trade on stale data, but keep running to recover
+            return True
+        return False
+
+    def _check_stop_loss(self, current_price) -> bool:
+        """
+        Check if price breached stop-loss threshold.
+        Returns True if stop-loss triggered (bot is stopping).
+        """
+        if self.stop_loss_triggered:
+            return True  # Already triggered, waiting to stop
+            
+        stop_loss = self.strategy_params.get('stop_loss')
+        if stop_loss is None:
+            return False
+            
+        if current_price <= stop_loss:
+            self.logger.critical(
+                f"🚨 STOP-LOSS TRIGGERED! Price {current_price} <= {stop_loss}"
+            )
+            self.logger.critical("Cancelling all orders and stopping bot...")
+            
+            self.stop_loss_triggered = True
+            self.cancel_open_orders()
+            self.running = False
+            
+            # Update status to reflect stop-loss
+            self.db.update_worker_heartbeat(
+                self.worker_id, self.symbol, 'STOP_LOSS', 0.0
+            )
+            return True
+        return False
 
     def handle_message(self, msg):
         cmd = msg.get('command')

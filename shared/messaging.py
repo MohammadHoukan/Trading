@@ -69,3 +69,87 @@ class RedisBus:
         except Exception as e:
             self.logger.error(f"Failed to expire {key}: {e}")
             return False
+
+    # --- Redis Streams for reliable command delivery ---
+    
+    def xadd(self, stream, message, maxlen=1000):
+        """
+        Add message to a Redis Stream.
+        
+        Args:
+            stream: Stream name
+            message: Dict of field-value pairs
+            maxlen: Maximum stream length (auto-trimmed)
+            
+        Returns:
+            Message ID or None on error
+        """
+        try:
+            return self.r.xadd(stream, message, maxlen=maxlen)
+        except Exception as e:
+            self.logger.error(f"Failed to xadd to {stream}: {e}")
+            return None
+
+    def create_consumer_group(self, stream, group, start_id='0'):
+        """
+        Create a consumer group for a stream.
+        
+        Args:
+            stream: Stream name
+            group: Consumer group name
+            start_id: Starting message ID ('0' for all, '$' for new only)
+        """
+        try:
+            self.r.xgroup_create(stream, group, id=start_id, mkstream=True)
+            return True
+        except Exception as e:
+            # Group already exists is OK
+            if 'BUSYGROUP' in str(e):
+                return True
+            self.logger.error(f"Failed to create consumer group {group}: {e}")
+            return False
+
+    def xreadgroup(self, group, consumer, stream, count=1, block=1000):
+        """
+        Read from stream with consumer group (guaranteed delivery).
+        
+        Args:
+            group: Consumer group name
+            consumer: Consumer name (usually worker_id)
+            stream: Stream name
+            count: Max messages to read
+            block: Block timeout in ms (0 = no block)
+            
+        Returns:
+            List of (message_id, fields) tuples or empty list
+        """
+        try:
+            result = self.r.xreadgroup(
+                group, consumer, 
+                {stream: '>'}, 
+                count=count, 
+                block=block
+            )
+            if result:
+                # Result format: [[stream_name, [(id, fields), ...]]]
+                return [(msg_id, fields) for msg_id, fields in result[0][1]]
+            return []
+        except Exception as e:
+            self.logger.error(f"Failed to xreadgroup from {stream}: {e}")
+            return []
+
+    def xack(self, stream, group, message_id):
+        """
+        Acknowledge message processing.
+        
+        Args:
+            stream: Stream name
+            group: Consumer group name
+            message_id: Message ID to acknowledge
+        """
+        try:
+            return self.r.xack(stream, group, message_id)
+        except Exception as e:
+            self.logger.error(f"Failed to xack {message_id}: {e}")
+            return 0
+
