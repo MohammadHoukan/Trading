@@ -36,7 +36,37 @@ class Database:
             pnl REAL
         )
         ''')
-        
+
+        # Table for grid events (observability for ML training)
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS grid_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp REAL,
+            worker_id TEXT,
+            symbol TEXT,
+            event_type TEXT,
+            side TEXT,
+            price REAL,
+            amount REAL,
+            grid_level INTEGER,
+            order_id TEXT,
+            market_price REAL,
+            grid_levels INTEGER,
+            grid_spacing REAL,
+            lower_limit REAL,
+            upper_limit REAL,
+            inventory REAL,
+            avg_cost REAL,
+            realized_profit REAL
+        )
+        ''')
+
+        # Index for efficient querying by symbol and time
+        cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_grid_events_symbol_time
+        ON grid_events (symbol, timestamp)
+        ''')
+
         conn.commit()
         conn.close()
 
@@ -83,3 +113,61 @@ class Database:
                 conn.close()
         except Exception as e:
             self.logger.error(f"DB Error update_worker_heartbeat: {e}")
+
+    def log_grid_event(self, event_data: dict):
+        """
+        Log a grid event for ML training data collection.
+
+        event_data should contain:
+            - timestamp: float (time.time())
+            - worker_id: str
+            - symbol: str
+            - event_type: 'FILL' | 'PLACE' | 'CANCEL'
+            - side: 'buy' | 'sell'
+            - price: float
+            - amount: float
+            - grid_level: int
+            - order_id: str (optional)
+            - market_price: float (current market price at event time)
+            - grid_levels: int (total grid levels)
+            - grid_spacing: float (spacing between levels)
+            - lower_limit: float
+            - upper_limit: float
+            - inventory: float (current inventory after event)
+            - avg_cost: float (average cost basis)
+            - realized_profit: float (total realized profit)
+        """
+        try:
+            conn = self.get_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute('''
+                INSERT INTO grid_events (
+                    timestamp, worker_id, symbol, event_type, side, price, amount,
+                    grid_level, order_id, market_price, grid_levels, grid_spacing,
+                    lower_limit, upper_limit, inventory, avg_cost, realized_profit
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    event_data.get('timestamp'),
+                    event_data.get('worker_id'),
+                    event_data.get('symbol'),
+                    event_data.get('event_type'),
+                    event_data.get('side'),
+                    event_data.get('price'),
+                    event_data.get('amount'),
+                    event_data.get('grid_level'),
+                    event_data.get('order_id'),
+                    event_data.get('market_price'),
+                    event_data.get('grid_levels'),
+                    event_data.get('grid_spacing'),
+                    event_data.get('lower_limit'),
+                    event_data.get('upper_limit'),
+                    event_data.get('inventory'),
+                    event_data.get('avg_cost'),
+                    event_data.get('realized_profit'),
+                ))
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception as e:
+            self.logger.error(f"DB Error log_grid_event: {e}")

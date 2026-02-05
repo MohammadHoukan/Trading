@@ -178,6 +178,48 @@ class GridBot:
         if amount is not None and amount <= 0:
             raise ValueError("amount_per_grid must be > 0")
 
+    def _log_grid_event(self, event_type: str, side: str, price: float, amount: float,
+                        grid_level: int, order_id: str = None, market_price: float = None):
+        """
+        Log a grid event for ML training data collection.
+
+        Args:
+            event_type: 'FILL', 'PLACE', or 'CANCEL'
+            side: 'buy' or 'sell'
+            price: order price
+            amount: order amount
+            grid_level: index of the grid level
+            order_id: exchange order ID (optional)
+            market_price: current market price (optional, will fetch if not provided)
+        """
+        try:
+            if market_price is None:
+                ticker = self.order_manager.fetch_ticker(self.symbol)
+                market_price = ticker.get('last', price) if ticker else price
+
+            event_data = {
+                'timestamp': time.time(),
+                'worker_id': self.worker_id,
+                'symbol': self.symbol,
+                'event_type': event_type,
+                'side': side,
+                'price': price,
+                'amount': amount,
+                'grid_level': grid_level,
+                'order_id': order_id,
+                'market_price': market_price,
+                'grid_levels': self.grid_levels,
+                'grid_spacing': self.grid_step,
+                'lower_limit': self.strategy_params.get('lower_limit'),
+                'upper_limit': self.strategy_params.get('upper_limit'),
+                'inventory': self.inventory,
+                'avg_cost': self.avg_cost,
+                'realized_profit': self.realized_profit,
+            }
+            self.db.log_grid_event(event_data)
+        except Exception as e:
+            self.logger.warning(f"Failed to log grid event: {e}")
+
     def _has_existing_order(self, grid_index, side):
         grid = self.grids[grid_index]
         return any(order['side'] == side for order in grid['orders'])
@@ -366,6 +408,15 @@ class GridBot:
             grid['orders'].append({'id': order['id'], 'side': side, 'amount': amount, 'price': price})
             self.active_orders.add(order['id'])
             self.logger.info(f"Placed {side} order at {price} (Grid {grid_index})")
+            # Log PLACE event for ML training data
+            self._log_grid_event(
+                event_type='PLACE',
+                side=side,
+                price=price,
+                amount=amount,
+                grid_level=grid_index,
+                order_id=order['id']
+            )
             return True
         except Exception as e:
             self.logger.error(f"Failed to place {side} order at {price}: {e}")
@@ -431,6 +482,16 @@ class GridBot:
                             if filled_amount > 0:
                                 self.logger.info(f"Order {order_id} ({side}) filled qty={filled_amount}.")
                                 self._apply_fill(side, filled_amount, fill_price)
+                                # Log FILL event for ML training data
+                                self._log_grid_event(
+                                    event_type='FILL',
+                                    side=side,
+                                    price=fill_price,
+                                    amount=filled_amount,
+                                    grid_level=i,
+                                    order_id=order_id,
+                                    market_price=fill_price  # Use fill price as market price at fill time
+                                )
                                 self._rebalance_after_fill(i, side, filled_amount, allow_rebalance)
                             elif status == 'closed':
                                 self.logger.warning(
