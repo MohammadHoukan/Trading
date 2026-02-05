@@ -63,7 +63,7 @@ def test_rate_limiter_get_remaining_empty_window():
 
 
 def test_rate_limiter_fail_open_on_error():
-    """Should allow request on Redis error (fail open)."""
+    """Should deny request on Redis error (fail closed)."""
     with patch('redis.Redis') as mock_redis:
         mock_instance = MagicMock()
         mock_redis.return_value = mock_instance
@@ -77,5 +77,5 @@ def test_rate_limiter_fail_open_on_error():
         
         result = limiter.acquire(timeout=0.1)
         
-        # Should fail open to prevent deadlock
-        assert result is True
+        # Should fail closed to prevent IP bans
+        assert result is False
