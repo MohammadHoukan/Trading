@@ -21,6 +21,7 @@ class TestDataFetcher(unittest.TestCase):
         # Create data spanning 20 days ago to now
         dates = pd.date_range(end=datetime.utcnow(), periods=20*24, freq='1h')
         df = pd.DataFrame(index=dates, data={'close': [100]*len(dates)})
+        df.index.name = 'timestamp' # FIX: Explicitly name index so to_csv includes header
         df.to_csv(self.path)
 
     def tearDown(self):

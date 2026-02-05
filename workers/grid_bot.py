@@ -47,7 +47,8 @@ class GridBot:
         self.api_key = None
         self.secret = None
         
-        if 'pool' in self.config['exchange']:
+        self.use_pool = 'pool' in self.config['exchange']
+        if self.use_pool:
             self.logger.info("Attempting to acquire API Key from Pool...")
             acquired = False
             for creds in self.config['exchange']['pool']:
@@ -606,6 +607,13 @@ class GridBot:
         if self._has_existing_order(grid_index, side):
             self.logger.info(f"Skipping duplicate {side} order at grid {grid_index}")
             return False
+            
+        # Hardening: Prevent placing orders if we lost the API Key lock (if in pool mode)
+        if self.use_pool and not self.key_lock_id:
+            self.logger.critical("🚨 ATTEMPTED TRADE WITHOUT LOCK! Stopping bot.")
+            self.running = False  # Force stop
+            return False
+
         try:
             if side == 'buy':
                 order = self.order_manager.create_limit_buy(self.symbol, amount, price)
@@ -945,6 +953,10 @@ class GridBot:
         }
         if not self.bus.publish(self.config['redis']['channels']['status'], status_msg):
             self.logger.error(f"Failed to publish terminal status {status}")
+
+        # Hardening: Persist final state to Redis Hash so dashboard sees it even if it missed the pubsub
+        if not self.bus.hset('workers:data', self.worker_id, json.dumps(status_msg)):
+            self.logger.error("Failed to persist terminal status to Redis Hash.")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
