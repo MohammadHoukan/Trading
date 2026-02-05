@@ -16,6 +16,7 @@ from shared.config import load_config, get_redis_params
 from shared.rate_limiter import RateLimiter
 import hashlib
 import threading
+import signal
 
 # Constants
 STALE_DATA_THRESHOLD_SECONDS = 15
@@ -131,6 +132,14 @@ class GridBot:
         self.grid_step = 0.0  # Calculated when grid is initialized
         if self.rolling_grids_enabled:
             self.logger.info("Rolling Grids ENABLED - grid will shift with price")
+
+        # Setup Signal Handlers for Graceful Shutdown
+        signal.signal(signal.SIGINT, self._handle_signal)
+        signal.signal(signal.SIGTERM, self._handle_signal)
+
+    def _handle_signal(self, signum, frame):
+        self.logger.info(f"Received signal {signum}. Stopping...")
+        self.running = False
 
     def _renew_lock_loop(self):
         """Background thread to keep the API Key lock alive."""
@@ -754,6 +763,9 @@ class GridBot:
                 self.logger.error(f"Error in main loop: {e}")
                 pubsub = None
                 time.sleep(5)
+        
+        self.logger.info("Main loop ended. Cleaning up...")
+        self._publish_terminal_status('STOPPED')
 
     def _check_stream_commands(self):
         """Check Redis Streams for reliable command delivery."""
