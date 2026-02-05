@@ -141,9 +141,10 @@ class GridBot:
                     """
                     result = self.bus.r.eval(script, 1, self.key_lock_id, self.worker_id, 60)
                     if not result:
-                        self.logger.warning("Lost API Key lock ownership! Stopping renewal.")
-                        self.key_lock_id = None  # Stop trying
-                        # Ideally trigger a stop or re-acquire, but for now just warn/stop renewing
+                        self.logger.warning("Lost API Key lock ownership! Stopping bot.")
+                        self.key_lock_id = None
+                        self.running = False  # Fix #6: Stop bot on lock loss
+                        self._publish_terminal_status('ERROR')
             except Exception as e:
                 self.logger.error(f"Failed to renew API Key lock: {e}")
             time.sleep(30)
@@ -549,6 +550,7 @@ class GridBot:
             self.db.update_worker_heartbeat(
                 self.worker_id, self.symbol, 'STOP_LOSS', 0.0
             )
+            self._publish_terminal_status('STOP_LOSS')  # Fix #2: Notify orchestrator
             return True
         return False
 
@@ -561,6 +563,7 @@ class GridBot:
                 self.logger.warning("Received STOP signal.")
                 self.cancel_open_orders()
                 self.running = False
+                self._publish_terminal_status('STOPPED')  # Fix #2: Notify orchestrator
             elif cmd == 'PAUSE':
                 self.logger.info("Received PAUSE signal. Suspending operations.")
                 self.paused = True
@@ -589,6 +592,20 @@ class GridBot:
             self.logger.error("Failed to update worker status snapshot in Redis.")
         if not self.bus.publish(self.config['redis']['channels']['status'], status_msg):
             self.logger.error("Failed to publish worker status update.")
+
+    def _publish_terminal_status(self, status: str):
+        """Publish terminal status (STOPPED, STOP_LOSS, ERROR) to orchestrator for cleanup."""
+        status_msg = {
+            'worker_id': self.worker_id,
+            'symbol': self.symbol,
+            'status': status,
+            'inventory': self.inventory,
+            'avg_cost': self.avg_cost,
+            'realized_profit': self.realized_profit,
+            'last_updated': time.time()
+        }
+        if not self.bus.publish(self.config['redis']['channels']['status'], status_msg):
+            self.logger.error(f"Failed to publish terminal status {status}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

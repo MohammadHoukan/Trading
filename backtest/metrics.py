@@ -65,10 +65,15 @@ def calculate_metrics(
         best_trade = max(pnls) if pnls else 0.0
         worst_trade = min(pnls) if pnls else 0.0
         
-        # Profit factor
+        # Profit factor (Fix #3: Handle break-even case)
         gross_profit = sum(winners) if winners else 0.0
         gross_loss = abs(sum(losers)) if losers else 0.0
-        profit_factor = gross_profit / gross_loss if gross_loss > 0 else float('inf')
+        if gross_loss > 0:
+            profit_factor = gross_profit / gross_loss
+        elif gross_profit > 0:
+            profit_factor = float('inf')  # All winners, no losers
+        else:
+            profit_factor = 1.0  # Break-even: no winners, no losers
     else:
         win_rate = 0.0
         avg_trade_pnl = 0.0

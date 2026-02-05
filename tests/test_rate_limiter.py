@@ -62,7 +62,7 @@ def test_rate_limiter_get_remaining_empty_window():
         assert remaining == 10
 
 
-def test_rate_limiter_fail_open_on_error():
+def test_rate_limiter_fail_closed_on_error():
     """Should deny request on Redis error (fail closed)."""
     with patch('redis.Redis') as mock_redis:
         mock_instance = MagicMock()

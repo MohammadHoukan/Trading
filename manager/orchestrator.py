@@ -40,6 +40,10 @@ class Orchestrator:
             
         # Check for terminal status to release resources
         if status in ('STOPPED', 'STOP_LOSS', 'ERROR'):
+            # Persist terminal status to dashboard before cleanup (Fix #5)
+            msg['last_updated'] = time.time()
+            self.bus.hset('workers:data', worker_id, json.dumps(msg))
+            
             self.risk_engine.unregister_worker(worker_id)
             self.rejected_workers.discard(worker_id)
             return
@@ -106,8 +110,9 @@ class Orchestrator:
         if status['total_allocated'] > self.risk_engine.max_global_capital:
             if not self.stop_broadcast_sent:
                 self.logger.critical("GLOBAL RISK LIMIT EXCEEDED! STOPPING ALL WORKERS.")
-                self.broadcast_command('STOP')
-                self.stop_broadcast_sent = True
+                if self.broadcast_command('STOP'):
+                    self.stop_broadcast_sent = True
+                # If broadcast failed, we'll retry on next check
         else:
             if self.stop_broadcast_sent:
                  self.logger.info("Global risk normalization. Resetting STOP flag.")
@@ -132,9 +137,12 @@ class Orchestrator:
             self.last_regime = regime
 
     def broadcast_command(self, cmd, target='all'):
+        """Broadcast command to workers. Returns True on success, False on failure."""
         message = {'command': cmd, 'target': target}
-        if not self.bus.publish(self.config['redis']['channels']['command'], message):
+        success = self.bus.publish(self.config['redis']['channels']['command'], message)
+        if not success:
             self.logger.error(f"Failed to broadcast command {cmd} to {target}")
+        return success
 
     def shutdown(self):
         self.logger.info("Shutting down... sending STOP to all workers.")

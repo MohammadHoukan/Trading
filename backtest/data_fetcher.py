@@ -80,10 +80,17 @@ def fetch_ohlcv(
     if use_cache:
         cached = load_cached(symbol, timeframe)
         if cached is not None and not cached.empty:
-            # Check if cache covers the requested duration
+            # Check if cache covers the requested duration AND has sufficient density
             duration = cached.index[-1] - cached.index[0]
-            if duration >= timedelta(days=days - 0.1): # Allow small margin
-                return cached
+            if duration >= timedelta(days=days - 0.1):  # Time span check
+                # Fix #4: Check candle density (at least 80% of expected)
+                timeframe_hours = {'1h': 1, '4h': 4, '1d': 24, '15m': 0.25}.get(timeframe, 1)
+                expected_candles = (days * 24) / timeframe_hours
+                actual_candles = len(cached)
+                if actual_candles >= expected_candles * 0.8:
+                    return cached
+                else:
+                    logger.warning(f"Cache density too low: {actual_candles}/{expected_candles:.0f} candles")
     
     logger.info(f"Fetching {days} days of {timeframe} data for {symbol}...")
     
