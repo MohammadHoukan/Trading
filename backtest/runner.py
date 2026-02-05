@@ -145,17 +145,17 @@ def main():
     # Use strategy config as defaults, CLI args override
     if strategy:
         logger.info(f"Loaded strategy config for {args.pair}")
-        lower = args.lower or strategy.get('lower_limit')
-        upper = args.upper or strategy.get('upper_limit')
-        grids = args.grids or strategy.get('grid_levels', 20)
-        amount = args.amount or strategy.get('amount_per_grid', 0.1)
-        stop_loss = args.stop_loss or strategy.get('stop_loss')
-        rolling = args.rolling or strategy.get('rolling_grids', False)
+        lower = args.lower if args.lower is not None else strategy.get('lower_limit')
+        upper = args.upper if args.upper is not None else strategy.get('upper_limit')
+        grids = args.grids if args.grids is not None else strategy.get('grid_levels', 20)
+        amount = args.amount if args.amount is not None else strategy.get('amount_per_grid', 0.1)
+        stop_loss = args.stop_loss if args.stop_loss is not None else strategy.get('stop_loss')
+        rolling = args.rolling if args.rolling is not False else strategy.get('rolling_grids', False)
     else:
         lower = args.lower
         upper = args.upper
-        grids = args.grids or 20
-        amount = args.amount or 0.1
+        grids = args.grids if args.grids is not None else 20
+        amount = args.amount if args.amount is not None else 0.1
         stop_loss = args.stop_loss
         rolling = args.rolling
     

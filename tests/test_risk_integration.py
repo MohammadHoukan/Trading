@@ -46,6 +46,7 @@ class TestRiskEngineIntegration(unittest.TestCase):
         orch.bus = MagicMock()
         orch.risk_engine = self.risk_engine
         orch.logger = MagicMock()
+        orch.stop_broadcast_sent = False
         
         # Limits: Global 500.
         

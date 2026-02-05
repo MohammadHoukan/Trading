@@ -162,91 +162,99 @@ class GridSimulator:
                 logger.warning(f"Stop-loss triggered at {self.stop_loss}")
                 break
             
-            # Check for buy fills (price went down through grid levels)
-            filled_buys = []
-            for level in list(buy_levels):
-                grid_price = self.grid_prices[level]
-                if low <= grid_price:
-                    # Buy filled!
-                    cost = grid_price * self.amount_per_grid
-                    fee = cost * (self.fees_percent / 100)
-                    
-                    if capital >= cost + fee:
-                        capital -= cost + fee
-                        
-                        # Update inventory and avg cost
-                        total_cost = (avg_cost * inventory) + (grid_price * self.amount_per_grid)
-                        inventory += self.amount_per_grid
-                        avg_cost = total_cost / inventory if inventory > 0 else 0.0
-                        
-                        trades.append(Trade(
-                            timestamp=timestamp,
-                            side='buy',
-                            price=grid_price,
-                            amount=self.amount_per_grid,
-                            grid_level=level
-                        ))
-                        
-                        filled_buys.append(level)
-                        
-                        # Place sell order one level higher
-                        if level + 1 <= self.grid_levels:
-                            sell_levels.add(level + 1)
-                        elif self.rolling:
-                            # Roll grid UP
-                            self.grid_prices.pop(0)
-                            new_top = self.grid_prices[-1] + self.grid_step
-                            self.grid_prices.append(new_top)
-                            sell_levels.add(len(self.grid_prices) - 1)
+            # Determine intra-candle execution order
+            # Green (Open <= Close): Low -> High (Buy then Sell)
+            # Red   (Open > Close):  High -> Low (Sell then Buy)
+            phases = ['buy', 'sell'] if row['open'] <= row['close'] else ['sell', 'buy']
             
-            for level in filled_buys:
-                buy_levels.discard(level)
-            
-            # Check for sell fills (price went up through grid levels)
-            filled_sells = []
-            for level in list(sell_levels):
-                grid_price = self.grid_prices[level]
-                if high >= grid_price and inventory >= self.amount_per_grid:
-                    # Sell filled!
-                    amount = min(self.amount_per_grid, inventory)
-                    proceeds = grid_price * amount
-                    fee = proceeds * (self.fees_percent / 100)
+            for phase in phases:
+                if phase == 'buy':
+                    # Check for buy fills (price went down through grid levels)
+                    filled_buys = []
+                    for level in list(buy_levels):
+                        grid_price = self.grid_prices[level]
+                        if low <= grid_price:
+                            # Buy filled!
+                            cost = grid_price * self.amount_per_grid
+                            fee = cost * (self.fees_percent / 100)
+                            
+                            if capital >= cost + fee:
+                                capital -= cost + fee
+                                
+                                # Update inventory and avg cost
+                                total_cost = (avg_cost * inventory) + (grid_price * self.amount_per_grid)
+                                inventory += self.amount_per_grid
+                                avg_cost = total_cost / inventory if inventory > 0 else 0.0
+                                
+                                trades.append(Trade(
+                                    timestamp=timestamp,
+                                    side='buy',
+                                    price=grid_price,
+                                    amount=self.amount_per_grid,
+                                    grid_level=level
+                                ))
+                                
+                                filled_buys.append(level)
+                                
+                                # Place sell order one level higher
+                                if level + 1 <= self.grid_levels:
+                                    sell_levels.add(level + 1)
+                                elif self.rolling:
+                                    # Roll grid UP
+                                    self.grid_prices.pop(0)
+                                    new_top = self.grid_prices[-1] + self.grid_step
+                                    self.grid_prices.append(new_top)
+                                    sell_levels.add(len(self.grid_prices) - 1)
                     
-                    pnl = (grid_price - avg_cost) * amount - fee
-                    realized_pnl += pnl
-                    capital += proceeds - fee
-                    inventory -= amount
+                    for level in filled_buys:
+                        buy_levels.discard(level)
+
+                elif phase == 'sell':
+                    # Check for sell fills (price went up through grid levels)
+                    filled_sells = []
+                    for level in list(sell_levels):
+                        grid_price = self.grid_prices[level]
+                        if high >= grid_price and inventory >= self.amount_per_grid:
+                            # Sell filled!
+                            amount = min(self.amount_per_grid, inventory)
+                            proceeds = grid_price * amount
+                            fee = proceeds * (self.fees_percent / 100)
+                            
+                            pnl = (grid_price - avg_cost) * amount - fee
+                            realized_pnl += pnl
+                            capital += proceeds - fee
+                            inventory -= amount
+                            
+                            if inventory <= 0:
+                                inventory = 0.0
+                                avg_cost = 0.0
+                            
+                            trades.append(Trade(
+                                timestamp=timestamp,
+                                side='sell',
+                                price=grid_price,
+                                amount=amount,
+                                grid_level=level,
+                                pnl=pnl
+                            ))
+                            
+                            filled_sells.append(level)
+                            
+                            # Place buy order one level lower
+                            if level - 1 >= 0:
+                                buy_levels.add(level - 1)
+                            elif self.rolling:
+                                # Roll grid DOWN
+                                self.grid_prices.pop()
+                                new_bottom = self.grid_prices[0] - self.grid_step
+                                self.grid_prices.insert(0, new_bottom)
+                                buy_levels.add(0)
+                                # Adjust all level indices in buy_levels and sell_levels
+                                buy_levels = {l + 1 for l in buy_levels if l >= 0}
+                                sell_levels = {l + 1 for l in sell_levels}
                     
-                    if inventory <= 0:
-                        inventory = 0.0
-                        avg_cost = 0.0
-                    
-                    trades.append(Trade(
-                        timestamp=timestamp,
-                        side='sell',
-                        price=grid_price,
-                        amount=amount,
-                        grid_level=level,
-                        pnl=pnl
-                    ))
-                    
-                    filled_sells.append(level)
-                    
-                    # Place buy order one level lower
-                    if level - 1 >= 0:
-                        buy_levels.add(level - 1)
-                    elif self.rolling:
-                        # Roll grid DOWN
-                        self.grid_prices.pop()
-                        new_bottom = self.grid_prices[0] - self.grid_step
-                        self.grid_prices.insert(0, new_bottom)
-                        buy_levels.add(0)
-                        # Adjust all level indices in buy_levels and sell_levels
-                        buy_levels = {l + 1 for l in buy_levels if l >= 0}
-                        sell_levels = {l + 1 for l in sell_levels}
-            
-            for level in filled_sells:
-                sell_levels.discard(level)
+                    for level in filled_sells:
+                        sell_levels.discard(level)
             
             # Track equity
             unrealized = inventory * close - (avg_cost * inventory) if inventory > 0 else 0.0

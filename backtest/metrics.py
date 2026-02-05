@@ -67,7 +67,7 @@ def calculate_metrics(
         
         # Profit factor
         gross_profit = sum(winners) if winners else 0.0
-        gross_loss = abs(sum(losers)) if losers else 1.0  # Avoid division by zero
+        gross_loss = abs(sum(losers)) if losers else 0.0
         profit_factor = gross_profit / gross_loss if gross_loss > 0 else float('inf')
     else:
         win_rate = 0.0
@@ -88,8 +88,18 @@ def calculate_metrics(
     if len(equity_curve) > 1:
         returns = equity_curve.pct_change().dropna()
         if len(returns) > 0 and returns.std() > 0:
-            # Annualize (assuming hourly data, ~8760 hours per year)
-            periods_per_year = 8760
+            # Calculate periods per year dynamically
+            # Get median time diff in hours
+            time_diffs = equity_curve.index.to_series().diff().dropna()
+            if not time_diffs.empty:
+                median_seconds = time_diffs.dt.total_seconds().median()
+                if median_seconds > 0:
+                    periods_per_year = (365 * 24 * 3600) / median_seconds
+                else:
+                    periods_per_year = 8760 # Fallback to hourly
+            else:
+                 periods_per_year = 8760
+
             excess_return = returns.mean() - (risk_free_rate / periods_per_year)
             sharpe_ratio = excess_return / returns.std() * np.sqrt(periods_per_year)
     

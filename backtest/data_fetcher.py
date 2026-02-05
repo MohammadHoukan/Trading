@@ -79,8 +79,11 @@ def fetch_ohlcv(
     # Try cache first
     if use_cache:
         cached = load_cached(symbol, timeframe)
-        if cached is not None and len(cached) >= days * 24:  # Rough check
-            return cached
+        if cached is not None and not cached.empty:
+            # Check if cache covers the requested duration
+            duration = cached.index[-1] - cached.index[0]
+            if duration >= timedelta(days=days - 0.1): # Allow small margin
+                return cached
     
     logger.info(f"Fetching {days} days of {timeframe} data for {symbol}...")
     
