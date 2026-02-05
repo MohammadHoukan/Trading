@@ -58,7 +58,8 @@ class GridSimulator:
         initial_capital: float = 1000.0,
         stop_loss: Optional[float] = None,
         fees_percent: float = 0.1,  # 0.1% per trade (Binance default)
-        rolling: bool = False  # Enable rolling/infinity grids
+        rolling: bool = False,  # Enable rolling/infinity grids
+        trend_filter_period: Optional[int] = None  # SMA period for trend filter (e.g., 50)
     ):
         """
         Initialize grid simulator.
@@ -88,6 +89,10 @@ class GridSimulator:
         
         mode_str = "ROLLING" if rolling else "FIXED"
         logger.info(f"Grid ({mode_str}): {grid_levels} levels from {lower_limit} to {upper_limit}, step={self.grid_step:.4f}")
+        
+        self.trend_filter_period = trend_filter_period
+        if trend_filter_period:
+            logger.info(f"Trend filter enabled: SMA-{trend_filter_period}")
     
     def run(self, ohlcv_df: pd.DataFrame) -> BacktestResult:
         """
@@ -130,6 +135,11 @@ class GridSimulator:
         
         logger.info(f"Initialized {len(buy_levels)} buy levels, {len(sell_levels)} sell levels")
         
+        # Calculate trend filter (SMA)
+        sma = None
+        if self.trend_filter_period:
+            sma = ohlcv_df['close'].rolling(window=self.trend_filter_period).mean()
+        
         # Simulate price movement
         for timestamp, row in ohlcv_df.iterrows():
             high = row['high']
@@ -169,6 +179,13 @@ class GridSimulator:
             
             for phase in phases:
                 if phase == 'buy':
+                    # Trend Filter: Skip buying if price is below SMA (downtrend)
+                    if sma is not None:
+                        current_sma = sma.get(timestamp)
+                        if current_sma is not None and not pd.isna(current_sma):
+                            if close < current_sma:
+                                continue  # Skip buying in downtrend
+                    
                     # Check for buy fills (price went down through grid levels)
                     filled_buys = []
                     for level in list(buy_levels):

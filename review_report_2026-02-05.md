@@ -1,93 +1,71 @@
-# Codebase Review Report (2026-02-05)
+# Codebase Review Report (Updated 2026-02-05)
 
-## Updates Read Before Writing This Report
-1. Reviewed recent history through `7f6e385` (`git log --oneline --decorate -n 12`).
-2. Reviewed current working-tree changes (`git status --short`, `git diff --name-only`).
-3. Reviewed the only local diff in `config/strategies.json` (SOL/ETH grid parameter updates).
-4. Re-ran test baseline: `venv/bin/python -m pytest -q` -> `40 passed in 2.46s`.
+## Scope
+1. Re-reviewed current `HEAD` after latest commits (`46a1f92` and predecessors).
+2. Focused on behavior changes in `workers/`, `manager/`, `shared/`, and `backtest/`.
+3. Validation run: `venv/bin/python -m pytest -q` -> `40 passed in 2.37s`.
 
-## Verification Summary
-1. Confirmed findings: 13
-2. Partially confirmed findings (refined framing): 5
-3. Retracted findings: 0
+## Findings (Current State)
+1. `High` Global STOP can be silently dropped after a transient publish failure.
+Evidence: `manager/orchestrator.py:107`, `manager/orchestrator.py:134`, `manager/orchestrator.py:137`
+Detail: `stop_broadcast_sent` is set after attempting STOP broadcast, but `broadcast_command` does not return success/failure to gate that flag. A single failed publish can suppress further STOP attempts while breach persists.
 
-## Confirmed Findings
-1. `Critical` Infinite blocking risk in command stream read.
-Evidence: `workers/grid_bot.py:490`, `shared/messaging.py:127`
-Detail: `xreadgroup(..., block=0)` is treated as non-blocking in comments, but `BLOCK 0` blocks indefinitely.
+2. `High` Worker unregistration path is mostly unreachable from worker shutdown paths.
+Evidence: `manager/orchestrator.py:42`, `workers/grid_bot.py:560`, `workers/grid_bot.py:549`
+Detail: manager only unregisters on terminal status updates, but worker STOP/STOP_LOSS paths do not publish terminal status to the manager status channel. This can leave stale `active_bots` and allocations.
 
-2. `High` Stale-data watchdog ineffective in live loop ordering.
-Evidence: `workers/grid_bot.py:457`, `workers/grid_bot.py:462`
-Detail: `last_price_update` is set immediately after fetch, then stale check runs, so age is near-zero on successful fetches.
+3. `High` Profit factor regression for break-even strategies (`0/0 -> inf`).
+Evidence: `backtest/metrics.py:69`, `backtest/metrics.py:70`, `backtest/metrics.py:71`
+Detail: when all sell-trade PnL values are zero, winners and losers are both empty and `profit_factor` becomes `inf`, which is mathematically misleading for break-even performance.
 
-3. `High` API key lock renewal does not verify owner.
-Evidence: `workers/grid_bot.py:133`
-Detail: lock TTL is extended without checking key value still matches this worker ID.
+4. `Medium` Cache validation can accept severely undersampled history.
+Evidence: `backtest/data_fetcher.py:84`, `backtest/data_fetcher.py:85`
+Detail: cache completeness is validated only by time span (`last - first`) and not by candle density/count, so sparse data can be accepted as full coverage.
 
-4. `High` Worker lifecycle leak can exhaust concurrency permanently.
-Evidence: `manager/risk_engine.py:17`
-Detail: active workers are added but never removed/expired.
+5. `Medium` Terminal worker states are not persisted to dashboard snapshot store.
+Evidence: `manager/orchestrator.py:42`, `manager/orchestrator.py:45`, `manager/orchestrator.py:64`
+Detail: terminal updates return early before writing `workers:data`, so dashboard may keep showing old `RUNNING/PAUSED` state until stale timeout.
 
-5. `High` Backtest same-candle fill ordering can bias results.
-Evidence: `backtest/simulator.py:165`, `backtest/simulator.py:205`
-Detail: buy fills are processed before sell fills in the same candle, allowing optimistic intrabar assumptions.
+6. `Medium` API key lock-loss detection is not fail-safe.
+Evidence: `workers/grid_bot.py:144`, `workers/grid_bot.py:145`
+Detail: on lock ownership loss, renewal stops but bot continues running with same key. This can allow concurrent key usage if another worker acquires the lock.
 
-6. `Medium` DB connection leak risk on error paths.
-Evidence: `shared/database.py:50`, `shared/database.py:72`
-Detail: connections are closed on success paths, but not guaranteed in exception paths.
+7. `Low` Test name drift in rate limiter suite.
+Evidence: `tests/test_rate_limiter.py:65`
+Detail: function name still says `fail_open`, but behavior and assertion are now fail-closed.
 
-7. `Medium` Rate limiter fails open on Redis errors.
-Evidence: `shared/rate_limiter.py:81`
-Detail: exceptions in limiter return allow (`True`), increasing external API limit risk during outages.
+## Coverage Gaps
+1. No test for STOP retry semantics when publish fails under sustained global-risk breach.
+Evidence: `manager/orchestrator.py:107`, `tests/test_risk_integration.py:57`
 
-8. `Medium` Repeated STOP broadcasts on persistent risk breach.
-Evidence: `manager/orchestrator.py:97`
-Detail: STOP command is sent every loop iteration without debounce/latch.
+2. No test that worker terminal statuses are published and trigger unregistration end-to-end.
+Evidence: `manager/orchestrator.py:42`, `workers/grid_bot.py:560`, `tests/test_risk_integration.py:62`
 
-9. `Medium` Dashboard may trust conflicting `worker_id` in payload.
-Evidence: `dashboard/state.py:53`
-Detail: payload `worker_id` can override canonical Redis hash key ID.
+3. No unit tests for backtest edge cases introduced by metric/cache updates.
+Evidence: `backtest/metrics.py:69`, `backtest/data_fetcher.py:84`
 
-10. `Medium` Backtest cache sufficiency assumes hourly candles.
-Evidence: `backtest/data_fetcher.py:82`
-Detail: `days * 24` threshold ignores configured timeframe.
+4. No deterministic tests for intra-candle phase ordering behavior in simulator.
+Evidence: `backtest/simulator.py:165`
 
-11. `Medium` Sharpe annualization hardcoded to hourly frequency.
-Evidence: `backtest/metrics.py:92`
-Detail: fixed `8760` periods per year misstates Sharpe for non-hourly data.
+## Resolved Since Prior Report
+1. Stream command read now uses bounded blocking instead of indefinite block.
+Evidence: `workers/grid_bot.py:503`
 
-12. `Medium` Profit factor handling is incorrect when no losing trades exist.
-Evidence: `backtest/metrics.py:70`
-Detail: forcing `gross_loss = 1.0` yields finite PF instead of explicit no-loss behavior.
+2. Lock renewal now verifies ownership before extending TTL.
+Evidence: `workers/grid_bot.py:136`, `workers/grid_bot.py:142`
 
-13. `Medium` CLI override logic ignores valid zero-like values.
-Evidence: `backtest/runner.py:148`
-Detail: `arg or default` pattern overrides explicit `0` / `0.0`.
+3. Database write paths now close connections in `finally`.
+Evidence: `shared/database.py:51`, `shared/database.py:75`
 
-## Partially Confirmed / Refined Findings
-1. Silent publish-success risk is confirmed for manager path only.
-Evidence: `manager/orchestrator.py:119`, `shared/messaging.py:14`, `dashboard/state.py:17`
-Refinement: dashboard path already checks subscriber count semantics separately.
+4. Rate limiter now fails closed on Redis errors.
+Evidence: `shared/rate_limiter.py:83`
 
-2. Precision/float risk is real but impact is exchange-adapter dependent.
-Evidence: `workers/grid_bot.py:330`, `workers/order_manager.py:29`
-Refinement: no explicit precision normalization is visible in this path; runtime effect may vary by exchange/CCXT behavior.
-
-3. Infinite retry behavior applies to runtime loop failures, not all startup failures.
-Evidence: `manager/orchestrator.py:87`
-Refinement: `run()` loop catches/retries runtime exceptions; constructor/load-time failures are outside this loop.
-
-4. Test-gap claim needed narrowing.
-Evidence: `tests/test_dashboard_state.py:24`, `tests/test_risk_integration.py:61`
-Refinement: there are existing failure-path tests, but targeted gaps remain for manager publish semantics, worker cleanup lifecycle, STOP debounce, and `worker_id` mismatch handling.
-
-5. README stop-loss statement is outdated at system level.
-Evidence: `readme.md:44`, `workers/grid_bot.py:515`, `tests/test_stop_loss.py:45`
-Refinement: stop-loss exists in `GridBot` flow; README statement is stale.
+5. Dashboard worker identity now uses Redis hash key as source of truth.
+Evidence: `dashboard/state.py:54`, `dashboard/state.py:58`
 
 ## Priority Fix Order
-1. Fix stream blocking semantics in command reads.
-2. Correct lock renewal to use ownership-checked renew logic.
-3. Add worker expiry/unregister path for `active_bots`.
-4. Correct backtest candle fill assumptions and metrics time-scaling.
-5. Add targeted regression tests for the confirmed high-impact cases.
+1. Gate `stop_broadcast_sent` on successful STOP publish, and retry while breach persists.
+2. Publish terminal status from workers on STOP/STOP_LOSS/ERROR so manager can unregister reliably.
+3. Fix `profit_factor` semantics for break-even/no-loss edge cases.
+4. Strengthen cache validation with expected-candle-density checks.
+5. Add regression tests for the high-impact runtime and backtest edge cases above.

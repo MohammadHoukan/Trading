@@ -48,7 +48,8 @@ def load_all_strategies() -> Dict[str, dict]:
 def run_portfolio_backtest(
     days: int,
     initial_capital_per_bot: float,
-    fees_percent: float = 0.1
+    fees_percent: float = 0.1,
+    trend_filter_period: int = None
 ):
     """Run backtest for all enabled strategies."""
     strategies = load_all_strategies()
@@ -80,7 +81,8 @@ def run_portfolio_backtest(
                 initial_capital=initial_capital_per_bot,
                 stop_loss=config.get('stop_loss'),
                 fees_percent=fees_percent,
-                rolling=config.get('rolling_grids', False)
+                rolling=config.get('rolling_grids', False),
+                trend_filter_period=trend_filter_period
             )
             
             # Run
@@ -185,7 +187,8 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Portfolio Backtester')
     parser.add_argument('--days', '-d', type=int, default=30, help='Days of history')
     parser.add_argument('--capital', '-c', type=float, default=1000.0, help='Capital per bot')
+    parser.add_argument('--trend-filter', '-t', type=int, default=None, help='SMA period for trend filter (e.g., 50)')
     
     args = parser.parse_args()
     
-    run_portfolio_backtest(args.days, args.capital)
+    run_portfolio_backtest(args.days, args.capital, trend_filter_period=args.trend_filter)
