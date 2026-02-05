@@ -59,7 +59,9 @@ class GridSimulator:
         stop_loss: Optional[float] = None,
         fees_percent: float = 0.1,  # 0.1% per trade (Binance default)
         rolling: bool = False,  # Enable rolling/infinity grids
-        trend_filter_period: Optional[int] = None  # SMA period for trend filter (e.g., 50)
+        trend_filter_period: Optional[int] = None,  # SMA period for trend filter (e.g., 50)
+        database = None,  # Optional: Shared Database instance for logging
+        symbol: str = "SOL/USDT" # Symbol for logging
     ):
         """
         Initialize grid simulator.
@@ -73,6 +75,8 @@ class GridSimulator:
             stop_loss: Stop-loss price (optional)
             fees_percent: Trading fee percentage
             rolling: If True, grid shifts when price breaks bounds
+            database: Optional Database instance for logging events
+            symbol: Symbol for logging
         """
         self.lower_limit = lower_limit
         self.upper_limit = upper_limit
@@ -82,6 +86,8 @@ class GridSimulator:
         self.stop_loss = stop_loss
         self.fees_percent = fees_percent
         self.rolling = rolling
+        self.database = database
+        self.symbol = symbol
         
         # Calculate grid prices
         self.grid_step = (upper_limit - lower_limit) / grid_levels
@@ -93,6 +99,32 @@ class GridSimulator:
         self.trend_filter_period = trend_filter_period
         if trend_filter_period:
             logger.info(f"Trend filter enabled: SMA-{trend_filter_period}")
+
+    def _log_event(self, event_type, side, price, amount, grid_level, market_price, timestamp,
+                   inventory=0.0, avg_cost=0.0, realized_profit=0.0):
+        """Helper to log event to database if configured."""
+        if self.database:
+            event_data = {
+                'timestamp': timestamp.timestamp(),
+                'worker_id': 'backtest_simulator',
+                'symbol': self.symbol,
+                'event_type': event_type,
+                'side': side,
+                'price': price,
+                'amount': amount,
+                'grid_level': grid_level,
+                'order_id': f"sim_{event_type}_{grid_level}_{timestamp.timestamp()}",
+                'market_price': market_price,
+                'grid_levels': self.grid_levels,
+                'grid_spacing': self.grid_step,
+                'lower_limit': self.lower_limit,
+                'upper_limit': self.upper_limit,
+                'inventory': inventory,
+                'avg_cost': avg_cost,
+                'realized_profit': realized_profit,
+                'source': 'backtest',
+            }
+            self.database.log_grid_event(event_data)
     
     def run(self, ohlcv_df: pd.DataFrame) -> BacktestResult:
         """
@@ -130,8 +162,12 @@ class GridSimulator:
         for i, price in enumerate(self.grid_prices):
             if price < first_price * 0.995:  # Below current price = buy
                 buy_levels.add(i)
+                self._log_event('PLACE', 'buy', price, self.amount_per_grid, i, first_price, ohlcv_df.index[0],
+                               inventory, avg_cost, realized_pnl)
             elif price > first_price * 1.005:  # Above current price = sell
                 sell_levels.add(i)
+                self._log_event('PLACE', 'sell', price, self.amount_per_grid, i, first_price, ohlcv_df.index[0],
+                               inventory, avg_cost, realized_pnl)
         
         logger.info(f"Initialized {len(buy_levels)} buy levels, {len(sell_levels)} sell levels")
         
@@ -213,10 +249,15 @@ class GridSimulator:
                                 ))
                                 
                                 filled_buys.append(level)
-                                
+
+                                self._log_event('FILL', 'buy', grid_price, self.amount_per_grid, level, low, timestamp,
+                                               inventory, avg_cost, realized_pnl)
+
                                 # Place sell order one level higher
                                 if level + 1 <= self.grid_levels:
                                     sell_levels.add(level + 1)
+                                    self._log_event('PLACE', 'sell', self.grid_prices[level+1], self.amount_per_grid, level+1, low, timestamp,
+                                                   inventory, avg_cost, realized_pnl)
                                 elif self.rolling:
                                     # Roll grid UP
                                     self.grid_prices.pop(0)
@@ -257,10 +298,15 @@ class GridSimulator:
                             ))
                             
                             filled_sells.append(level)
-                            
+
+                            self._log_event('FILL', 'sell', grid_price, amount, level, high, timestamp,
+                                           inventory, avg_cost, realized_pnl)
+
                             # Place buy order one level lower
                             if level - 1 >= 0:
                                 buy_levels.add(level - 1)
+                                self._log_event('PLACE', 'buy', self.grid_prices[level-1], self.amount_per_grid, level-1, high, timestamp,
+                                               inventory, avg_cost, realized_pnl)
                             elif self.rolling:
                                 # Roll grid DOWN
                                 self.grid_prices.pop()

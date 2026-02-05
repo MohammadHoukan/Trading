@@ -57,7 +57,8 @@ class Database:
             upper_limit REAL,
             inventory REAL,
             avg_cost REAL,
-            realized_profit REAL
+            realized_profit REAL,
+            source TEXT DEFAULT 'live'
         )
         ''')
 
@@ -136,6 +137,7 @@ class Database:
             - inventory: float (current inventory after event)
             - avg_cost: float (average cost basis)
             - realized_profit: float (total realized profit)
+            - source: 'live' | 'backtest' (default: 'live')
         """
         try:
             conn = self.get_connection()
@@ -145,8 +147,8 @@ class Database:
                 INSERT INTO grid_events (
                     timestamp, worker_id, symbol, event_type, side, price, amount,
                     grid_level, order_id, market_price, grid_levels, grid_spacing,
-                    lower_limit, upper_limit, inventory, avg_cost, realized_profit
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    lower_limit, upper_limit, inventory, avg_cost, realized_profit, source
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     event_data.get('timestamp'),
                     event_data.get('worker_id'),
@@ -165,6 +167,7 @@ class Database:
                     event_data.get('inventory'),
                     event_data.get('avg_cost'),
                     event_data.get('realized_profit'),
+                    event_data.get('source', 'live'),
                 ))
                 conn.commit()
             finally:
