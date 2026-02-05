@@ -24,9 +24,9 @@ def _cache_path(symbol: str, timeframe: str) -> str:
     return os.path.join(CACHE_DIR, f"{safe_symbol}_{timeframe}.csv")
 
 
-def load_cached(symbol: str, timeframe: str, max_age_hours: int = 24) -> pd.DataFrame | None:
+def load_cached(symbol: str, timeframe: str, days: int, max_age_hours: int = 24) -> pd.DataFrame | None:
     """
-    Load cached OHLCV data if it exists and is fresh enough.
+    Load cached OHLCV data if it exists, is fresh enough, AND covers the requested duration.
     
     Args:
         symbol: Trading pair (e.g., 'SOL/USDT')
@@ -48,6 +48,16 @@ def load_cached(symbol: str, timeframe: str, max_age_hours: int = 24) -> pd.Data
     
     try:
         df = pd.read_csv(path, parse_dates=['timestamp'], index_col='timestamp')
+        
+        # Verify coverage
+        expected_start = datetime.utcnow() - timedelta(days=days)
+        # Allow 5% buffer on start time (e.g. if we asked for 30 days, 29 is ok, but 15 is not)
+        # Or simpler: Is the first timestamp older than expected_start + buffer?
+        # If cached data starts at T-20 days, but we requested T-30 days, it's stale for this purpose.
+        if df.index[0] > (expected_start + timedelta(days=1)):
+            logger.info(f"Cache miss: Data starts at {df.index[0]}, need {expected_start}")
+            return None
+
         logger.info(f"Loaded {len(df)} candles from cache for {symbol}")
         return df
     except Exception as e:
@@ -78,7 +88,7 @@ def fetch_ohlcv(
     """
     # Try cache first
     if use_cache:
-        cached = load_cached(symbol, timeframe)
+        cached = load_cached(symbol, timeframe, days)
         if cached is not None and not cached.empty:
             # Check if cache covers the requested duration AND has sufficient density
             duration = cached.index[-1] - cached.index[0]

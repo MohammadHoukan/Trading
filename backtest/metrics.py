@@ -71,7 +71,7 @@ def calculate_metrics(
         if gross_loss > 0:
             profit_factor = gross_profit / gross_loss
         elif gross_profit > 0:
-            profit_factor = float('inf')  # All winners, no losers
+            profit_factor = 100.0  # Capped at 100 for serialization safety
         else:
             profit_factor = 1.0  # Break-even: no winners, no losers
     else:
