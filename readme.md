@@ -12,22 +12,21 @@ This system is engineered with strict **Risk & Asset Constraints**:
 2. **Zero Leverage:** Operates strictly on a 1:1 capital basis (no margin borrowing).
 3. **Long-Only:** No short selling. The system focuses on accumulating and selling the underlying asset.
 
-It utilizes a **Hub-and-Spoke** architecture to manage concurrency, allowing multiple assets to be traded simultaneously while maintaining a global risk state.
+It utilizes a **Hub-and-Spoke** architecture to manage concurrency, allowing multiple assets to be traded simultaneously while maintaining a global risk state. The current implementation focuses on orchestration, messaging, and status reporting; grid execution and risk controls are still stubs.
 
 ## 🏗 Architecture
 
 The system mimics a microservices pattern using **Redis Pub/Sub** for inter-process communication:
 
 * **👑 The Manager (Orchestrator):**
-* Monitors global market volatility (Regime Detection).
-* Allocates capital dynamically to workers.
-* Enforces global "Kill Switch" protocols.
+* Subscribes to worker status updates and can broadcast commands (e.g., STOP).
+* Regime detection and risk checks are placeholders.
 
 
 * **🐝 The Workers (Swarm):**
 * Independent processes spawned per trading pair (e.g., `SOL/USDT`, `ETH/USDT`).
-* Execute localized Grid Trading logic (Buy Low / Sell High).
-* Maintain their own order state and heartbeat.
+* Maintain their heartbeat with unique worker IDs (order/grid state is planned).
+* Current loop fetches ticker data and reports status (grid logic is a stub).
 
 
 * **📡 The Bus (Redis):**
@@ -52,19 +51,19 @@ The following constraints are hard-coded into the `order_manager.py` logic:
 * **State Management:** SQLite (Local)
 * **Analysis:** `pandas`, `pandas_ta` (ADX/ATR calculation)
 * **Dashboard:** `Streamlit`
+* **Config:** `python-dotenv` for `.env` support
 
 ## 📂 Project Structure
 
 ```bash
 spot-grid-swarm/
 ├── manager/
-│   ├── orchestrator.py    # Main process; manages worker lifecycle
-│   ├── regime_filter.py   # [STUB] ADX/ATR logic for market regime detection
-│   └── risk_engine.py     # [STUB] Enforces global exposure limits
+│   └── orchestrator.py    # Main process; manages worker lifecycle
 ├── workers/
 │   ├── grid_bot.py        # Individual worker logic
 │   └── order_manager.py   # CCXT wrapper with strict Spot-only rules
 ├── shared/
+│   ├── config.py          # .env + ${VAR} config resolution and coercion
 │   ├── messaging.py       # Redis class wrappers
 │   └── database.py        # SQLite interface
 ├── config/
@@ -72,6 +71,7 @@ spot-grid-swarm/
 │   └── strategies.json    # [STUB] Grid parameters (Upper/Lower limits) per pair
 ├── tests/                 # Smoke and unit tests
 ├── dashboard/             # Streamlit UI
+├── .agent/workflows/      # Agentic runbooks (setup/start)
 ├── requirements.txt
 └── README.md
 
@@ -87,22 +87,34 @@ Ensure **Redis** is installed and running.
 redis-server
 ```
 
-**Install Dependencies:**
+**Install Dependencies (recommended in a venv):**
 
 ```bash
+python3 -m venv venv
+source venv/bin/activate
 pip install -r requirements.txt
 ```
 
 ### 2. Configuration
 
-Edit `config/settings.yaml`:
+Copy `.env.example` to `.env` and set your values:
+
+```bash
+cp .env.example .env
+```
+
+The system resolves `${VAR}` or `${VAR:-default}` in `config/settings.yaml` via `python-dotenv`.
+Numeric values (e.g., `REDIS_PORT`, `RISK_PER_BOT`) are coerced to `int/float` with validation.
+`config/strategies.json` is not wired into the worker yet; grid settings are currently passed via CLI flags.
+
+Example `config/settings.yaml`:
 
 ```yaml
 exchange:
   name: binance
   mode: testnet  # Toggle 'live' for production
-  api_key: "YOUR_KEY"
-  secret: "YOUR_SECRET"
+  api_key: "${BINANCE_API_KEY}"
+  secret: "${BINANCE_SECRET_KEY}"
 
 swarm:
   max_concurrency: 5
@@ -142,6 +154,18 @@ This project includes pre-defined workflows for agentic IDEs in `.agent/workflow
 *   **Start Manager:** `start_manager.md` - Launches the Orchestrator.
 *   **Start Worker:** `start_worker.md` - Spawns a grid bot (default SOL/USDT).
 *   **Start Dashboard:** `start_dashboard.md` - Starts the control room.
+
+### 5. Tests
+
+```bash
+pytest -q
+python tests/verify_env.py
+```
+
+## 🔒 Security Notes
+
+* The dashboard redacts config secrets (keys/tokens) before display.
+* `.env` is gitignored by default.
 
 ## ⚠️ Risk Disclaimer
 

@@ -8,19 +8,26 @@ import json
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
 from shared.messaging import RedisBus
-from shared.config import load_config
+from shared.config import load_config, get_redis_params
+from shared.config import load_config, get_redis_params
+from manager.risk_engine import RiskEngine
+from manager.regime_filter import RegimeFilter
 
 class Orchestrator:
     def __init__(self, config_path='config/settings.yaml'):
         # Load Config (with env substitution)
         self.config = load_config(config_path)
             
-        redis_cfg = self.config['redis']
-        self.bus = RedisBus(host=redis_cfg['host'], port=redis_cfg['port'], db=redis_cfg['db'])
+        self.bus = RedisBus(**get_redis_params(self.config))
+        self.bus = RedisBus(**get_redis_params(self.config))
+        self.risk_engine = RiskEngine(self.config)
+        self.regime_filter = RegimeFilter(self.config)
         self.logger = logging.getLogger("Manager")
         logging.basicConfig(level=logging.INFO)
         
         self.running = True
+        self.last_regime = None
+        self.last_regime_check = 0
 
     def run(self):
         self.logger.info("Starting Orchestrator...")
@@ -34,12 +41,21 @@ class Orchestrator:
                 msg = self.bus.get_message(pubsub)
                 if msg:
                      self.logger.info(f"Worker update: {msg}")
+                     # Update Risk Engine
+                     if 'worker_id' in msg and 'symbol' in msg:
+                         self.risk_engine.register_worker(msg['worker_id'], msg['symbol'])
+                         
+                         if 'exposure' in msg:
+                             self.risk_engine.update_exposure(msg['worker_id'], msg['exposure'])
 
                 # 2. Risk Checks (Stub)
                 self.perform_risk_checks()
                 
-                # 3. Regime Detection (Stub)
-                # if market_crash: broadcast_kill_switch()
+                # 3. Regime Detection (Every 60s)
+                now = time.time()
+                if now - self.last_regime_check > 60:
+                     self.perform_regime_checks()
+                     self.last_regime_check = now
 
                 time.sleep(1)
 
@@ -49,8 +65,27 @@ class Orchestrator:
                 self.logger.error(f"Orchestrator error: {e}")
 
     def perform_risk_checks(self):
-        # Example: Check total exposure across all bots
-        pass
+        # Check global limits
+        status = self.risk_engine.get_status()
+        self.logger.debug(f"Risk Status: {status}")
+        
+        if status['total_allocated'] > self.risk_engine.max_global_capital:
+            self.logger.critical("GLOBAL RISK LIMIT EXCEEDED! STOPPING ALL WORKERS.")
+            self.broadcast_command('STOP')
+
+    def perform_regime_checks(self):
+        regime = self.regime_filter.analyze_market()
+        self.logger.info(f"Regime Check: {regime}")
+        
+        if regime != self.last_regime:
+            if regime == 'TRENDING':
+                self.logger.warning("Regime change to TRENDING. Pausing Swarm.")
+                self.broadcast_command('PAUSE')
+            elif regime == 'RANGING' and self.last_regime == 'TRENDING':
+                self.logger.info("Regime change to RANGING. Resuming Swarm.")
+                self.broadcast_command('RESUME')
+            
+            self.last_regime = regime
 
     def broadcast_command(self, cmd, target='all'):
         message = {'command': cmd, 'target': target}

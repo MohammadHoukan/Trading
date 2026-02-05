@@ -8,7 +8,7 @@ import sys
 # Hack to add root path
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
-from shared.config import load_config
+from shared.config import load_config, get_redis_params
 
 def _redact_config(value):
     if isinstance(value, dict):
@@ -34,8 +34,13 @@ st.title("🐝 Spot-Grid-Swarm Control Room")
 # Redis Connection
 r = None
 try:
-    redis_cfg = config['redis']
-    r = redis.Redis(host=redis_cfg['host'], port=redis_cfg['port'], db=redis_cfg['db'], decode_responses=True)
+    redis_params = get_redis_params(config)
+    r = redis.Redis(
+        host=redis_params['host'],
+        port=redis_params['port'],
+        db=redis_params['db'],
+        decode_responses=True,
+    )
     r.ping()  # Verify connection works
     st.sidebar.success("Connected to Redis")
 except Exception as e:
