@@ -24,7 +24,7 @@ class Orchestrator:
         logging.basicConfig(level=logging.INFO)
         
         self.running = True
-        self.last_regime = None
+        self.regime_by_symbol = {}  # {symbol: regime} for multi-symbol awareness
         self.last_regime_check = 0
         self.rejected_workers = set()
         self.stop_broadcast_sent = False
@@ -119,23 +119,83 @@ class Orchestrator:
                  self.logger.info("Global risk normalization. Resetting STOP flag.")
                  self.stop_broadcast_sent = False
 
-    def perform_regime_checks(self):
-        regime = self.regime_filter.analyze_market()
-        self.logger.info(f"Regime Check: {regime}")
+    def _get_active_symbols(self):
+        """Get list of unique symbols from active workers."""
+        try:
+            worker_data = self.bus.hgetall('workers:data')
+            symbols = set()
+            for data in worker_data.values():
+                import json
+                try:
+                    w = json.loads(data)
+                    if w.get('status') in ('RUNNING', 'PAUSED'):
+                        symbols.add(w.get('symbol'))
+                except:
+                    pass
+            return list(symbols) if symbols else [self.regime_filter.default_symbol]
+        except:
+            return [self.regime_filter.default_symbol]
 
-        if regime in {'ERROR', 'UNKNOWN'}:
-            self.logger.warning(f"Skipping regime transition due to {regime}")
-            return
+    def perform_regime_checks(self):
+        """Check market regime for each active symbol and issue targeted PAUSE/RESUME."""
+        active_symbols = self._get_active_symbols()
         
-        if regime != self.last_regime:
-            if regime == 'TRENDING':
-                self.logger.warning("Regime change to TRENDING. Pausing Swarm.")
-                self.broadcast_command('PAUSE')
-            elif regime == 'RANGING' and self.last_regime == 'TRENDING':
-                self.logger.info("Regime change to RANGING. Resuming Swarm.")
-                self.broadcast_command('RESUME')
+        for symbol in active_symbols:
+            analysis = self.regime_filter.analyze_market(symbol)
             
-            self.last_regime = regime
+            regime = analysis.get('regime', 'UNKNOWN')
+            score = analysis.get('score', 50)
+            recommendation = analysis.get('recommendation', 'HOLD')
+            
+            self.logger.info(f"Regime Check [{symbol}]: {regime} (score={score}, rec={recommendation})")
+
+            if regime in {'ERROR', 'UNKNOWN'}:
+                self.logger.warning(f"Skipping regime transition for {symbol} due to {regime}")
+                continue
+            
+            last_regime = self.regime_by_symbol.get(symbol)
+            
+            # Only act on state changes to avoid spamming commands
+            if regime != last_regime:
+                if recommendation == 'PAUSE':
+                    self.logger.warning(f"Regime change to {regime} for {symbol}. Pausing.")
+                    self._pause_symbol_workers(symbol)
+                elif recommendation == 'RUN' and last_regime in {'TRENDING', 'UNCERTAIN'}:
+                    self.logger.info(f"Regime change to {regime} for {symbol}. Resuming.")
+                    self._resume_symbol_workers(symbol)
+                # HOLD = keep current state, don't send command
+                
+                self.regime_by_symbol[symbol] = regime
+
+    def _pause_symbol_workers(self, symbol):
+        """Send PAUSE to all workers trading a specific symbol."""
+        try:
+            worker_data = self.bus.hgetall('workers:data')
+            for worker_id, data in worker_data.items():
+                import json
+                try:
+                    w = json.loads(data)
+                    if w.get('symbol') == symbol and w.get('status') == 'RUNNING':
+                        self.broadcast_command('PAUSE', target=worker_id)
+                except:
+                    pass
+        except Exception as e:
+            self.logger.error(f"Failed to pause workers for {symbol}: {e}")
+
+    def _resume_symbol_workers(self, symbol):
+        """Send RESUME to all workers trading a specific symbol."""
+        try:
+            worker_data = self.bus.hgetall('workers:data')
+            for worker_id, data in worker_data.items():
+                import json
+                try:
+                    w = json.loads(data)
+                    if w.get('symbol') == symbol and w.get('status') == 'PAUSED':
+                        self.broadcast_command('RESUME', target=worker_id)
+                except:
+                    pass
+        except Exception as e:
+            self.logger.error(f"Failed to resume workers for {symbol}: {e}")
 
     def broadcast_command(self, cmd, target='all'):
         """Broadcast command to workers. Returns True on success, False on failure."""
