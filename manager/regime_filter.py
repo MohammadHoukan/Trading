@@ -80,7 +80,8 @@ class RegimeFilter:
             'regime': 'UNKNOWN',
             'score': 50,
             'signals': {},
-            'recommendation': 'HOLD'
+            'recommendation': 'HOLD',
+            'scale': 1.0,
         }
         
         try:
@@ -160,12 +161,21 @@ class RegimeFilter:
             if result['score'] >= 60:
                 result['regime'] = 'RANGING'
                 result['recommendation'] = 'RUN'
+                result['scale'] = 1.0
             elif result['score'] >= 40:
                 result['regime'] = 'UNCERTAIN'
                 result['recommendation'] = 'HOLD'  # Keep current state
+                result['scale'] = 1.0
             else:
                 result['regime'] = 'TRENDING'
-                result['recommendation'] = 'PAUSE'
+                result['recommendation'] = 'REDUCE_EXPOSURE'
+                trending_scale = self.config.get('regime', {}).get('trending_scale', 0.5)
+                try:
+                    trending_scale = float(trending_scale)
+                except (TypeError, ValueError):
+                    trending_scale = 0.5
+                # Clamp to sane range [0.05, 1.0] to avoid zero/negative order sizes.
+                result['scale'] = max(0.05, min(1.0, trending_scale))
             
             self.logger.info(
                 f"Regime [{symbol}]: {result['regime']} (score={result['score']}) "

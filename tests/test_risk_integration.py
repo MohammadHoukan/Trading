@@ -1,5 +1,6 @@
 
 import unittest
+import json
 from unittest.mock import MagicMock
 import sys
 import os
@@ -7,7 +8,7 @@ import os
 # Path hack
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
-from manager.risk_engine import RiskEngine
+from manager.risk_engine import RiskEngine, DrawdownAction
 from manager.orchestrator import Orchestrator
 
 class TestRiskEngineIntegration(unittest.TestCase):
@@ -194,6 +195,99 @@ class TestRiskEngineIntegration(unittest.TestCase):
 
         self.assertFalse(ok)
 
+    def test_update_worker_scale_succeeds_when_pubsub_fallback_works(self):
+        orch = Orchestrator.__new__(Orchestrator)
+        orch.config = {'redis': {'channels': {'command': 'cmd'}}}
+        orch.bus = MagicMock()
+        orch.logger = MagicMock()
+
+        orch.bus.xadd.return_value = None
+        orch.bus.publish.return_value = True
+
+        ok = orch.update_worker_scale('w1', 0.5)
+
+        self.assertTrue(ok)
+        orch.bus.xadd.assert_called_once_with(
+            'swarm:commands',
+            {'command': 'UPDATE_SCALE', 'target': 'w1', 'scale': 0.5},
+        )
+        orch.bus.publish.assert_called_once_with(
+            'cmd',
+            {'command': 'UPDATE_SCALE', 'target': 'w1', 'scale': 0.5},
+        )
+
+    def test_update_worker_scale_rejects_non_positive_scale(self):
+        orch = Orchestrator.__new__(Orchestrator)
+        orch.config = {'redis': {'channels': {'command': 'cmd'}}}
+        orch.bus = MagicMock()
+        orch.logger = MagicMock()
+
+        self.assertFalse(orch.update_worker_scale('w1', 0.0))
+        self.assertFalse(orch.update_worker_scale('w1', -1.0))
+        orch.bus.xadd.assert_not_called()
+        orch.bus.publish.assert_not_called()
+
+    def test_drawdown_halt_retries_when_stop_broadcast_fails(self):
+        orch = Orchestrator.__new__(Orchestrator)
+        orch.config = {'redis': {'channels': {'command': 'cmd'}}}
+        orch.bus = MagicMock()
+        orch.logger = MagicMock()
+        orch.stop_broadcast_sent = False
+        orch.drawdown_paused_workers = set()
+        orch.last_drawdown_action = DrawdownAction.NORMAL
+        orch.risk_engine = MagicMock()
+        orch.risk_engine.max_global_capital = 500.0
+        orch.risk_engine.get_status.return_value = {'total_allocated': 0.0}
+        orch.risk_engine.check_drawdown.return_value = DrawdownAction.HALT_ALL
+        orch.broadcast_command = MagicMock(return_value=False)
+
+        orch.perform_risk_checks()
+        self.assertFalse(orch.stop_broadcast_sent)
+        orch.broadcast_command.assert_called_once_with('STOP')
+
+        orch.perform_risk_checks()
+        self.assertEqual(orch.broadcast_command.call_count, 2)
+
+    def test_drawdown_recovery_resumes_only_workers_paused_by_drawdown(self):
+        orch = Orchestrator.__new__(Orchestrator)
+        orch.config = {'redis': {'channels': {'command': 'cmd'}}}
+        orch.bus = MagicMock()
+        orch.logger = MagicMock()
+        orch.stop_broadcast_sent = False
+        orch.drawdown_paused_workers = set()
+        orch.last_drawdown_action = DrawdownAction.NORMAL
+        orch.risk_engine = MagicMock()
+        orch.risk_engine.max_global_capital = 500.0
+        orch.risk_engine.get_status.return_value = {'total_allocated': 0.0}
+        orch.risk_engine.check_drawdown.side_effect = [
+            DrawdownAction.REDUCE_EXPOSURE,
+            DrawdownAction.NORMAL,
+        ]
+        orch.broadcast_command = MagicMock(return_value=True)
+        orch.bus.hgetall.side_effect = [
+            {
+                'w1': json.dumps({'status': 'RUNNING'}),
+                'w2': json.dumps({'status': 'PAUSED'}),
+            },
+            {
+                'w1': json.dumps({'status': 'PAUSED'}),
+                'w2': json.dumps({'status': 'PAUSED'}),
+            },
+        ]
+
+        orch.perform_risk_checks()
+        self.assertEqual(orch.drawdown_paused_workers, {'w1'})
+
+        orch.perform_risk_checks()
+        self.assertEqual(orch.drawdown_paused_workers, set())
+        self.assertEqual(
+            orch.broadcast_command.call_args_list,
+            [
+                unittest.mock.call('PAUSE', target='w1'),
+                unittest.mock.call('RESUME', target='w1'),
+            ],
+        )
+
 
 class TestDrawdownProtection(unittest.TestCase):
     """Tests for portfolio-level drawdown protection."""
@@ -318,6 +412,13 @@ class TestDrawdownProtection(unittest.TestCase):
         # Remove w1
         self.risk_engine.cleanup_worker_pnl('w1')
         self.assertEqual(self.risk_engine.current_equity, 30.0)
+
+    def test_drawdown_uses_baseline_when_equity_never_positive(self):
+        """Initial losses should still trigger drawdown protection."""
+        self.risk_engine.update_worker_pnl('w1', realized_pnl=-120.0, unrealized_pnl=0.0)
+        self.assertEqual(self.risk_engine.peak_equity, 0.0)
+        self.assertAlmostEqual(self.risk_engine.get_drawdown_pct(), 24.0, places=6)
+        self.assertEqual(self.risk_engine.check_drawdown(), DrawdownAction.HALT_ALL)
 
 
 if __name__ == '__main__':

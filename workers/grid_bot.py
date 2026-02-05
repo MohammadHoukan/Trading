@@ -106,6 +106,10 @@ class GridBot:
         self.grid_levels = self.strategy_params.get('grid_levels', self.grid_levels)
         self._validate_strategy_params()
         self.logger.info(f"Loaded strategy for {self.symbol}: {self.strategy_params}")
+
+        self.base_amount_per_grid = float(self.strategy_params.get('amount_per_grid', 0.1))
+        self.exposure_scale = 1.0
+        self.strategy_params['amount_per_grid'] = self.base_amount_per_grid
         
         self.grids = []  # List of {'price': float, 'orders': [{'id', 'side', 'amount', 'price'}]}
         self.active_orders = set()
@@ -298,6 +302,13 @@ class GridBot:
             self.logger.warning("No valid parameters to update")
             return
 
+        if 'amount_per_grid' in normalized:
+            # Treat runtime amount_per_grid as effective size; preserve base/scale relation.
+            if self.exposure_scale > 0:
+                self.base_amount_per_grid = normalized['amount_per_grid'] / self.exposure_scale
+            else:
+                self.base_amount_per_grid = normalized['amount_per_grid']
+
         candidate_params = dict(self.strategy_params)
         candidate_params.update(normalized)
         candidate_grid_levels = normalized.get('grid_levels', self.grid_levels)
@@ -352,6 +363,36 @@ class GridBot:
                 self.logger.critical("Rollback failed: could not restore previous grid state")
         finally:
             self.paused = was_paused
+
+    def _apply_scale_update(self, scale):
+        """
+        Apply exposure scaling without cancelling/rebuilding the current grid.
+
+        Scaling updates amount_per_grid for subsequent placements/rebalances while
+        preserving existing open orders and grid alignment.
+        """
+        try:
+            if isinstance(scale, bool):
+                raise ValueError("scale must be numeric")
+            if isinstance(scale, str):
+                scale = float(scale.strip())
+            elif isinstance(scale, (int, float)):
+                scale = float(scale)
+            else:
+                raise ValueError("scale must be numeric")
+            if scale <= 0:
+                raise ValueError("scale must be > 0")
+        except Exception as e:
+            self.logger.error(f"Rejected scale update: {e}")
+            return
+
+        old_scale = self.exposure_scale
+        self.exposure_scale = scale
+        self.strategy_params['amount_per_grid'] = self.base_amount_per_grid * self.exposure_scale
+        self.logger.info(
+            f"Applied exposure scale update: {old_scale:.4f} -> {self.exposure_scale:.4f}; "
+            f"amount_per_grid={self.strategy_params['amount_per_grid']:.8f}"
+        )
 
     def _has_existing_order(self, grid_index, side):
         grid = self.grids[grid_index]
@@ -847,6 +888,13 @@ class GridBot:
                     self._apply_param_update(new_params)
                 else:
                     self.logger.warning("UPDATE_PARAMS received with no params")
+            elif cmd == 'UPDATE_SCALE':
+                scale = msg.get('scale')
+                if scale is None:
+                    self.logger.warning("UPDATE_SCALE received without scale")
+                else:
+                    self.logger.info(f"Received UPDATE_SCALE signal: scale={scale}")
+                    self._apply_scale_update(scale)
 
     def report_status(self, current_price):
         # Update local DB
@@ -863,6 +911,8 @@ class GridBot:
             'avg_cost': self.avg_cost,
             'realized_profit': self.realized_profit,
             'exposure': self.inventory * current_price,
+            'exposure_scale': self.exposure_scale,
+            'amount_per_grid': self.strategy_params.get('amount_per_grid'),
             'last_updated': time.time()
         }
         if not self.bus.hset('workers:data', self.worker_id, json.dumps(status_msg)):

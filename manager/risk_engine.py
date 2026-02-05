@@ -39,6 +39,11 @@ class RiskEngine:
         self.drawdown_reduce_pct = drawdown_cfg.get('reduce_pct', 15.0)      # 15%
         self.drawdown_halt_pct = drawdown_cfg.get('halt_pct', 20.0)          # 20%
         self.position_scale_factor = drawdown_cfg.get('scale_factor', 0.5)   # 50% reduction
+        self.drawdown_baseline_equity = float(
+            drawdown_cfg.get('baseline_equity', self.max_global_capital)
+        )
+        if self.drawdown_baseline_equity <= 0:
+            self.drawdown_baseline_equity = 1.0
 
         # State - allocations and workers
         self.allocations = defaultdict(float)  # worker_id -> exposure amount
@@ -144,11 +149,15 @@ class RiskEngine:
         Returns:
             Drawdown as a positive percentage (e.g., 15.0 for 15% drawdown)
         """
-        if self.peak_equity <= 0:
-            return 0.0
+        if self.peak_equity > 0:
+            drawdown = self.peak_equity - self.current_equity
+            return (drawdown / self.peak_equity) * 100 if drawdown > 0 else 0.0
 
-        drawdown = self.peak_equity - self.current_equity
-        return (drawdown / self.peak_equity) * 100 if drawdown > 0 else 0.0
+        # Protective fallback when the strategy never reached positive equity:
+        # measure loss from a configurable absolute equity baseline.
+        if self.current_equity < 0:
+            return (abs(self.current_equity) / self.drawdown_baseline_equity) * 100
+        return 0.0
 
     def check_drawdown(self) -> DrawdownAction:
         """

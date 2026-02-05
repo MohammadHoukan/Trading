@@ -299,6 +299,37 @@ class TestGridLogic(unittest.TestCase):
         # Verify grid_levels was updated
         self.assertEqual(self.bot.grid_levels, 8)
 
+    def test_handle_message_update_scale(self):
+        self.bot.place_initial_orders(20.0)
+        before_ids = {o['id'] for o in self.bot.order_manager.fetch_open_orders("SOL/USDT")}
+
+        msg = {
+            'command': 'UPDATE_SCALE',
+            'target': self.bot.worker_id,
+            'scale': 0.5,
+        }
+        self.bot.handle_message(msg)
+
+        self.assertAlmostEqual(self.bot.exposure_scale, 0.5, places=6)
+        self.assertAlmostEqual(self.bot.strategy_params['amount_per_grid'], 0.5, places=6)
+        after_ids = {o['id'] for o in self.bot.order_manager.fetch_open_orders("SOL/USDT")}
+        self.assertEqual(after_ids, before_ids)
+
+    def test_handle_message_update_scale_rejects_invalid_value(self):
+        self.bot.place_initial_orders(20.0)
+        before_scale = self.bot.exposure_scale
+        before_amount = self.bot.strategy_params['amount_per_grid']
+
+        msg = {
+            'command': 'UPDATE_SCALE',
+            'target': self.bot.worker_id,
+            'scale': 0,
+        }
+        self.bot.handle_message(msg)
+
+        self.assertEqual(self.bot.exposure_scale, before_scale)
+        self.assertEqual(self.bot.strategy_params['amount_per_grid'], before_amount)
+
     def test_apply_param_update_rejects_invalid_grid_levels_type_without_clearing_orders(self):
         self.bot.place_initial_orders(20.0)
         before_ids = {o['id'] for o in self.bot.order_manager.fetch_open_orders("SOL/USDT")}

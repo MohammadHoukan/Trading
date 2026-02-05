@@ -33,6 +33,17 @@ Exchange rate limits are Global (per IP or per Account). 50 Workers checking pri
 
 ---
 
+### 2.5 Regime Execution Friction (Pause/Resume Cost)
+**The Risk:**
+Hard `PAUSE`/`RESUME` transitions during `TRENDING` can introduce more execution friction than the losses they avoid, especially when trend losses are small.
+
+**✅ Solution for Spot-Grid-Swarm:**
+- [x] **Regime-Based Exposure Scaling in Worker:** Added `UPDATE_SCALE` handling in `grid_bot.py` to adjust `amount_per_grid` in-place without cancelling/rebuilding grids.
+- [x] **Manager Command Support:** Added `UPDATE_SCALE` command path in `orchestrator.py` (`update_worker_scale` / `update_symbol_scale`).
+- [x] **RegimeFilter Integration:** Switched `TRENDING` recommendation from hard `PAUSE` to `REDUCE_EXPOSURE` with configurable `regime.trending_scale` (default `0.5`).
+
+---
+
 ## ⚠️ High Reliability (Production Hardening)
 
 ### 3. Redis Pub/Sub Data Loss

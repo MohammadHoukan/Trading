@@ -60,11 +60,12 @@ class TestRegimeIntegration(unittest.TestCase):
             return rf.analyze_market()
 
     def test_regime_logic_trending(self):
-        # Strong trend + high volatility + far from mean => trending / pause.
+        # Strong trend + high volatility + far from mean => trending / reduce exposure.
         close_series = [100.0] * 99 + [150.0]
         analysis = self._run_regime_with_signals(80.0, 20.0, close_series)
         self.assertEqual(analysis['regime'], 'TRENDING')
-        self.assertEqual(analysis['recommendation'], 'PAUSE')
+        self.assertEqual(analysis['recommendation'], 'REDUCE_EXPOSURE')
+        self.assertAlmostEqual(analysis['scale'], 0.5, places=6)
 
     def test_regime_logic_ranging(self):
         # Weak trend + moderate volatility + near mean => ranging / run.
@@ -82,18 +83,21 @@ class TestRegimeIntegration(unittest.TestCase):
         orch.logger = MagicMock()
         orch.regime_by_symbol = {'SOL/USDT': 'RANGING'}
 
-        # Test 1: Market becomes TRENDING -> targeted PAUSE for running symbol workers.
+        # Test 1: Market becomes TRENDING -> targeted scale reduction for symbol workers.
         orch.bus.hgetall.return_value = {
             'w_sol': '{"worker_id":"w_sol","symbol":"SOL/USDT","status":"RUNNING"}'
         }
         orch.regime_filter.analyze_market.return_value = {
             'regime': 'TRENDING',
             'score': 20,
-            'recommendation': 'PAUSE',
+            'recommendation': 'REDUCE_EXPOSURE',
+            'scale': 0.5,
         }
         orch.perform_regime_checks()
 
-        orch.bus.publish.assert_called_with('cmd', {'command': 'PAUSE', 'target': 'w_sol'})
+        orch.bus.publish.assert_called_with(
+            'cmd', {'command': 'UPDATE_SCALE', 'target': 'w_sol', 'scale': 0.5}
+        )
         self.assertEqual(orch.regime_by_symbol['SOL/USDT'], 'TRENDING')
 
         # Test 2: Market stays TRENDING -> no extra action.
@@ -101,7 +105,7 @@ class TestRegimeIntegration(unittest.TestCase):
         orch.perform_regime_checks()
         orch.bus.publish.assert_not_called()
 
-        # Test 3: Market becomes RANGING -> targeted RESUME for paused symbol workers.
+        # Test 3: Market becomes RANGING -> restore full exposure scale.
         orch.bus.hgetall.return_value = {
             'w_sol': '{"worker_id":"w_sol","symbol":"SOL/USDT","status":"PAUSED"}'
         }
@@ -109,10 +113,13 @@ class TestRegimeIntegration(unittest.TestCase):
             'regime': 'RANGING',
             'score': 75,
             'recommendation': 'RUN',
+            'scale': 1.0,
         }
         orch.perform_regime_checks()
 
-        orch.bus.publish.assert_called_with('cmd', {'command': 'RESUME', 'target': 'w_sol'})
+        orch.bus.publish.assert_called_with(
+            'cmd', {'command': 'UPDATE_SCALE', 'target': 'w_sol', 'scale': 1.0}
+        )
         self.assertEqual(orch.regime_by_symbol['SOL/USDT'], 'RANGING')
 
 if __name__ == '__main__':

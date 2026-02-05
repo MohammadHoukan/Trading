@@ -30,6 +30,9 @@ class Orchestrator:
         self.last_regime_check = 0
         self.rejected_workers = set()
         self.stop_broadcast_sent = False
+        # Track workers paused by drawdown logic so recovery resumes only those workers.
+        self.drawdown_paused_workers = set()
+        self.last_drawdown_action = DrawdownAction.NORMAL
 
     def handle_worker_update(self, msg):
         """Process a single worker status update and persist it for the dashboard."""
@@ -49,6 +52,7 @@ class Orchestrator:
             self.risk_engine.unregister_worker(worker_id)
             self.risk_engine.cleanup_worker_pnl(worker_id)
             self.rejected_workers.discard(worker_id)
+            self.drawdown_paused_workers.discard(worker_id)
             return
 
         accepted = self.risk_engine.register_worker(worker_id, symbol)
@@ -114,6 +118,12 @@ class Orchestrator:
                 time.sleep(1)
 
     def perform_risk_checks(self):
+        # Backward compatibility for tests that instantiate Orchestrator via __new__.
+        if not hasattr(self, 'drawdown_paused_workers'):
+            self.drawdown_paused_workers = set()
+        if not hasattr(self, 'last_drawdown_action'):
+            self.last_drawdown_action = DrawdownAction.NORMAL
+
         # Check global limits
         status = self.risk_engine.get_status()
         self.logger.debug(f"Risk Status: {status}")
@@ -138,13 +148,24 @@ class Orchestrator:
             # Critical drawdown - stop all trading
             if not self.stop_broadcast_sent:
                 self.logger.critical("DRAWDOWN HALT: Stopping all workers due to excessive drawdown!")
-                self.broadcast_command('STOP')
-                self.stop_broadcast_sent = True
+                if self.broadcast_command('STOP'):
+                    self.stop_broadcast_sent = True
+                else:
+                    self.logger.error("Failed to broadcast STOP for drawdown halt! Will retry next tick.")
 
         elif drawdown_action == DrawdownAction.REDUCE_EXPOSURE:
             # Elevated drawdown - pause new orders but don't close positions
             # Workers in PAUSED state won't place new orders but will manage existing ones
             self._pause_all_workers_for_drawdown()
+
+        elif (
+            drawdown_action == DrawdownAction.NORMAL
+            and self.last_drawdown_action == DrawdownAction.REDUCE_EXPOSURE
+        ):
+            # Recovery from drawdown reduction: resume only workers paused by drawdown logic.
+            self._resume_workers_paused_for_drawdown()
+
+        self.last_drawdown_action = drawdown_action
 
     def _get_active_symbols(self):
         """Get list of unique symbols from active workers."""
@@ -164,7 +185,7 @@ class Orchestrator:
             return [self.regime_filter.default_symbol]
 
     def perform_regime_checks(self):
-        """Check market regime for each active symbol and issue targeted PAUSE/RESUME."""
+        """Check market regime for each active symbol and issue targeted scale updates."""
         active_symbols = self._get_active_symbols()
         
         for symbol in active_symbols:
@@ -173,8 +194,11 @@ class Orchestrator:
             regime = analysis.get('regime', 'UNKNOWN')
             score = analysis.get('score', 50)
             recommendation = analysis.get('recommendation', 'HOLD')
+            scale = analysis.get('scale', 1.0)
             
-            self.logger.info(f"Regime Check [{symbol}]: {regime} (score={score}, rec={recommendation})")
+            self.logger.info(
+                f"Regime Check [{symbol}]: {regime} (score={score}, rec={recommendation}, scale={scale})"
+            )
 
             if regime in {'ERROR', 'UNKNOWN'}:
                 self.logger.warning(f"Skipping regime transition for {symbol} due to {regime}")
@@ -184,12 +208,14 @@ class Orchestrator:
             
             # Only act on state changes to avoid spamming commands
             if regime != last_regime:
-                if recommendation == 'PAUSE':
-                    self.logger.warning(f"Regime change to {regime} for {symbol}. Pausing.")
-                    self._pause_symbol_workers(symbol)
+                if recommendation == 'REDUCE_EXPOSURE':
+                    self.logger.warning(
+                        f"Regime change to {regime} for {symbol}. Reducing exposure to scale={scale}."
+                    )
+                    self.update_symbol_scale(symbol, scale)
                 elif recommendation == 'RUN' and last_regime in {'TRENDING', 'UNCERTAIN'}:
-                    self.logger.info(f"Regime change to {regime} for {symbol}. Resuming.")
-                    self._resume_symbol_workers(symbol)
+                    self.logger.info(f"Regime change to {regime} for {symbol}. Restoring exposure scale=1.0.")
+                    self.update_symbol_scale(symbol, 1.0)
                 # HOLD = keep current state, don't send command
                 
                 self.regime_by_symbol[symbol] = regime
@@ -228,19 +254,52 @@ class Orchestrator:
         """Pause all running workers due to drawdown threshold breach."""
         try:
             worker_data = self.bus.hgetall('workers:data')
+            if not worker_data:
+                return
             paused_count = 0
             for worker_id, data in worker_data.items():
                 try:
                     w = json.loads(data)
-                    if w.get('status') == 'RUNNING':
-                        self.broadcast_command('PAUSE', target=worker_id)
-                        paused_count += 1
+                    if w.get('status') == 'RUNNING' and worker_id not in self.drawdown_paused_workers:
+                        if self.broadcast_command('PAUSE', target=worker_id):
+                            self.drawdown_paused_workers.add(worker_id)
+                            paused_count += 1
                 except Exception:
                     pass
             if paused_count > 0:
                 self.logger.warning(f"Paused {paused_count} workers due to elevated drawdown")
         except Exception as e:
             self.logger.error(f"Failed to pause workers for drawdown: {e}")
+
+    def _resume_workers_paused_for_drawdown(self):
+        """Resume only workers previously paused by drawdown protection."""
+        if not self.drawdown_paused_workers:
+            return
+        try:
+            worker_data = self.bus.hgetall('workers:data') or {}
+            resumed_count = 0
+            for worker_id in list(self.drawdown_paused_workers):
+                raw = worker_data.get(worker_id)
+                if not raw:
+                    self.drawdown_paused_workers.discard(worker_id)
+                    continue
+                try:
+                    status = json.loads(raw).get('status')
+                except Exception:
+                    continue
+                if status in ('STOPPED', 'STOP_LOSS', 'ERROR'):
+                    self.drawdown_paused_workers.discard(worker_id)
+                elif status == 'PAUSED':
+                    if self.broadcast_command('RESUME', target=worker_id):
+                        self.drawdown_paused_workers.discard(worker_id)
+                        resumed_count += 1
+                else:
+                    # Already running or in another transient state; stop tracking.
+                    self.drawdown_paused_workers.discard(worker_id)
+            if resumed_count > 0:
+                self.logger.info(f"Resumed {resumed_count} workers after drawdown recovery")
+        except Exception as e:
+            self.logger.error(f"Failed to resume drawdown-paused workers: {e}")
 
     def broadcast_command(self, cmd, target='all'):
         """Broadcast command to workers. Returns True on success, False on failure."""
@@ -290,6 +349,75 @@ class Orchestrator:
             self.logger.info(f"Sent UPDATE_PARAMS to {worker_id}: {params}")
             return True
         return False
+
+    def update_worker_scale(self, worker_id: str, scale: float):
+        """
+        Send exposure-scale update to a specific worker.
+
+        Args:
+            worker_id: Target worker ID
+            scale: Multiplicative scale for amount_per_grid (e.g., 0.5 = half size)
+
+        Returns:
+            True on success, False on failure
+        """
+        try:
+            scale = float(scale)
+        except (TypeError, ValueError):
+            self.logger.error(f"Invalid scale for {worker_id}: {scale}")
+            return False
+
+        if scale <= 0:
+            self.logger.error(f"Scale must be > 0 for {worker_id}: {scale}")
+            return False
+
+        message = {
+            'command': 'UPDATE_SCALE',
+            'target': worker_id,
+            'scale': scale,
+        }
+
+        stream_id = self.bus.xadd(COMMAND_STREAM, message)
+        stream_success = stream_id is not None
+        if not stream_success:
+            self.logger.error(f"Failed to enqueue UPDATE_SCALE to stream for {worker_id}")
+
+        pubsub_success = self.bus.publish(self.config['redis']['channels']['command'], message)
+        if not pubsub_success:
+            self.logger.error(f"Failed to publish UPDATE_SCALE for {worker_id}")
+
+        if stream_success or pubsub_success:
+            self.logger.info(f"Sent UPDATE_SCALE to {worker_id}: scale={scale}")
+            return True
+        return False
+
+    def update_symbol_scale(self, symbol: str, scale: float):
+        """
+        Send exposure-scale update to all workers trading a specific symbol.
+
+        Args:
+            symbol: Trading pair (e.g., 'SOL/USDT')
+            scale: Multiplicative scale factor for amount_per_grid
+
+        Returns:
+            Number of workers updated
+        """
+        updated = 0
+        try:
+            worker_data = self.bus.hgetall('workers:data')
+            for worker_id, data in worker_data.items():
+                try:
+                    w = json.loads(data)
+                    if w.get('symbol') == symbol and w.get('status') in ('RUNNING', 'PAUSED'):
+                        if self.update_worker_scale(worker_id, scale):
+                            updated += 1
+                except Exception:
+                    pass
+        except Exception as e:
+            self.logger.error(f"Failed to update scale for {symbol}: {e}")
+
+        self.logger.info(f"Updated scale={scale} for {updated} workers on {symbol}")
+        return updated
 
     def update_symbol_params(self, symbol: str, params: dict):
         """
