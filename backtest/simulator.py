@@ -192,7 +192,7 @@ class GridSimulator:
         equity_curve = []
         
         # Get first price to initialize grid
-        first_price = ohlcv_df['close'].iloc[0]
+        first_price = ohlcv_df['open'].iloc[0]
         
         # Initialize grid orders
         for i, price in enumerate(self.grid_prices):
@@ -248,10 +248,8 @@ class GridSimulator:
             # Green (Open <= Close): Low -> High (Buy then Sell)
             # Red   (Open > Close):  High -> Low (Sell then Buy)
             phases = ['buy', 'sell'] if row['open'] <= row['close'] else ['sell', 'buy']
-            print(f"DEBUG: Row Open={row['open']} Close={row['close']} Phases={phases}")
             
             for phase in phases:
-                print(f"  DEBUG: Starting Phase {phase}. Inv={inventory}. Buys={buy_levels}, Sells={sell_levels}")
                 if phase == 'buy':
                     # Trend Filter: Skip buying if price is below SMA (downtrend)
                     if sma is not None:
