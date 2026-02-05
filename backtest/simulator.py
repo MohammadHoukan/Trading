@@ -132,6 +132,35 @@ class GridSimulator:
                 'source': 'backtest',
             }
             self.database.log_grid_event(event_data)
+
+    def _roll_grid_up_state(self, buy_levels: set, sell_levels: set):
+        """
+        Shift grid one step up and remap pending level indices.
+
+        Old index 0 is removed; all remaining levels shift down by 1.
+        """
+        self.grid_prices.pop(0)
+        new_top = self.grid_prices[-1] + self.grid_step
+        self.grid_prices.append(new_top)
+
+        remapped_buys = {level - 1 for level in buy_levels if level > 0}
+        remapped_sells = {level - 1 for level in sell_levels if level > 0}
+        return remapped_buys, remapped_sells, len(self.grid_prices) - 1
+
+    def _roll_grid_down_state(self, buy_levels: set, sell_levels: set):
+        """
+        Shift grid one step down and remap pending level indices.
+
+        Old top index is removed; all remaining levels shift up by 1.
+        """
+        old_top_index = len(self.grid_prices) - 1
+        self.grid_prices.pop()
+        new_bottom = self.grid_prices[0] - self.grid_step
+        self.grid_prices.insert(0, new_bottom)
+
+        remapped_buys = {level + 1 for level in buy_levels if level < old_top_index}
+        remapped_sells = {level + 1 for level in sell_levels if level < old_top_index}
+        return remapped_buys, remapped_sells, 0
     
     def run(self, ohlcv_df: pd.DataFrame) -> BacktestResult:
         """
@@ -230,8 +259,9 @@ class GridSimulator:
                                 continue  # Skip buying in downtrend
                     
                     # Check for buy fills (price went down through grid levels)
-                    filled_buys = []
-                    for level in list(buy_levels):
+                    for level in sorted(buy_levels, reverse=True):
+                        if level not in buy_levels or level >= len(self.grid_prices):
+                            continue
                         grid_price = self.grid_prices[level]
                         if low <= grid_price:
                             # Simulate realistic fill if model is enabled
@@ -266,8 +296,7 @@ class GridSimulator:
                                     amount=fill_amount,
                                     grid_level=level
                                 ))
-                                
-                                filled_buys.append(level)
+                                buy_levels.discard(level)
 
                                 self._log_event('FILL', 'buy', fill_price, fill_amount, level, low, timestamp,
                                                inventory, avg_cost, realized_pnl)
@@ -278,19 +307,16 @@ class GridSimulator:
                                     self._log_event('PLACE', 'sell', self.grid_prices[level+1], self.amount_per_grid, level+1, low, timestamp,
                                                    inventory, avg_cost, realized_pnl)
                                 elif self.rolling:
-                                    # Roll grid UP
-                                    self.grid_prices.pop(0)
-                                    new_top = self.grid_prices[-1] + self.grid_step
-                                    self.grid_prices.append(new_top)
-                                    sell_levels.add(len(self.grid_prices) - 1)
-                    
-                    for level in filled_buys:
-                        buy_levels.discard(level)
+                                    buy_levels, sell_levels, new_top_idx = self._roll_grid_up_state(
+                                        buy_levels, sell_levels
+                                    )
+                                    sell_levels.add(new_top_idx)
 
                 elif phase == 'sell':
                     # Check for sell fills (price went up through grid levels)
-                    filled_sells = []
-                    for level in list(sell_levels):
+                    for level in sorted(sell_levels):
+                        if level not in sell_levels or level >= len(self.grid_prices):
+                            continue
                         grid_price = self.grid_prices[level]
                         if high >= grid_price and inventory > 0:
                             # Simulate realistic fill if model is enabled
@@ -328,8 +354,7 @@ class GridSimulator:
                                 grid_level=level,
                                 pnl=pnl
                             ))
-                            
-                            filled_sells.append(level)
+                            sell_levels.discard(level)
 
                             self._log_event('FILL', 'sell', fill_price, fill_amount, level, high, timestamp,
                                            inventory, avg_cost, realized_pnl)
@@ -340,17 +365,10 @@ class GridSimulator:
                                 self._log_event('PLACE', 'buy', self.grid_prices[level-1], self.amount_per_grid, level-1, high, timestamp,
                                                inventory, avg_cost, realized_pnl)
                             elif self.rolling:
-                                # Roll grid DOWN
-                                self.grid_prices.pop()
-                                new_bottom = self.grid_prices[0] - self.grid_step
-                                self.grid_prices.insert(0, new_bottom)
-                                buy_levels.add(0)
-                                # Adjust all level indices in buy_levels and sell_levels
-                                buy_levels = {l + 1 for l in buy_levels if l >= 0}
-                                sell_levels = {l + 1 for l in sell_levels}
-                    
-                    for level in filled_sells:
-                        sell_levels.discard(level)
+                                buy_levels, sell_levels, new_bottom_idx = self._roll_grid_down_state(
+                                    buy_levels, sell_levels
+                                )
+                                buy_levels.add(new_bottom_idx)
             
             # Track equity
             unrealized = inventory * close - (avg_cost * inventory) if inventory > 0 else 0.0

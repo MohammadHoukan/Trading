@@ -182,6 +182,7 @@ class RegimeFilter:
 
     def _get_fill_rate(self, symbol, lookback_hours=24):
         """Get fill rate from grid_events database."""
+        conn = None
         try:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
@@ -196,7 +197,6 @@ class RegimeFilter:
             ''', (symbol, since))
             
             row = cursor.fetchone()
-            conn.close()
             
             if row and row[1] and row[1] > 0:
                 return row[0] / row[1]
@@ -205,4 +205,6 @@ class RegimeFilter:
         except Exception as e:
             self.logger.warning(f"Failed to fetch fill rate: {e}")
             return None
-
+        finally:
+            if conn is not None:
+                conn.close()

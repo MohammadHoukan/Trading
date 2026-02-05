@@ -132,5 +132,33 @@ class TestRiskEngineIntegration(unittest.TestCase):
         orch.perform_risk_checks()
         orch.bus.publish.assert_called_with('cmd', {'command': 'STOP', 'target': 'all'})
 
+    def test_broadcast_command_succeeds_when_stream_write_succeeds(self):
+        orch = Orchestrator.__new__(Orchestrator)
+        orch.config = {'redis': {'channels': {'command': 'cmd'}}}
+        orch.bus = MagicMock()
+        orch.logger = MagicMock()
+
+        orch.bus.xadd.return_value = "1-0"
+        orch.bus.publish.return_value = False
+
+        ok = orch.broadcast_command('STOP', target='all')
+
+        self.assertTrue(ok)
+        orch.bus.xadd.assert_called_once_with('swarm:commands', {'command': 'STOP', 'target': 'all'})
+        orch.bus.publish.assert_called_once_with('cmd', {'command': 'STOP', 'target': 'all'})
+
+    def test_broadcast_command_fails_when_stream_and_pubsub_fail(self):
+        orch = Orchestrator.__new__(Orchestrator)
+        orch.config = {'redis': {'channels': {'command': 'cmd'}}}
+        orch.bus = MagicMock()
+        orch.logger = MagicMock()
+
+        orch.bus.xadd.return_value = None
+        orch.bus.publish.return_value = False
+
+        ok = orch.broadcast_command('STOP', target='all')
+
+        self.assertFalse(ok)
+
 if __name__ == '__main__':
     unittest.main()

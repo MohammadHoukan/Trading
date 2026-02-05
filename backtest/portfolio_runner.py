@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from backtest.data_fetcher import fetch_ohlcv
 from backtest.simulator import GridSimulator, BacktestResult
+from backtest.execution_model import ExecutionModel
 from backtest.metrics import calculate_metrics, format_metrics, Metrics
 
 logging.basicConfig(
@@ -49,7 +50,8 @@ def run_portfolio_backtest(
     days: int,
     initial_capital_per_bot: float,
     fees_percent: float = 0.1,
-    trend_filter_period: int = None
+    trend_filter_period: int = None,
+    realistic: bool = False
 ):
     """Run backtest for all enabled strategies."""
     strategies = load_all_strategies()
@@ -72,6 +74,9 @@ def run_portfolio_backtest(
             # Fetch data
             ohlcv = fetch_ohlcv(pair, timeframe='1h', days=days)
             
+            # Setup Execution Model if requested
+            execution_model = ExecutionModel(enabled=True) if realistic else None
+            
             # Setup Simulator
             simulator = GridSimulator(
                 lower_limit=config['lower_limit'],
@@ -82,7 +87,8 @@ def run_portfolio_backtest(
                 stop_loss=config.get('stop_loss'),
                 fees_percent=fees_percent,
                 rolling=config.get('rolling_grids', False),
-                trend_filter_period=trend_filter_period
+                trend_filter_period=trend_filter_period,
+                execution_model=execution_model
             )
             
             # Run
@@ -188,7 +194,8 @@ if __name__ == '__main__':
     parser.add_argument('--days', '-d', type=int, default=30, help='Days of history')
     parser.add_argument('--capital', '-c', type=float, default=1000.0, help='Capital per bot')
     parser.add_argument('--trend-filter', '-t', type=int, default=None, help='SMA period for trend filter (e.g., 50)')
+    parser.add_argument('--realistic', '-r', action='store_true', help='Enable realistic execution model (slippage/fills)')
     
     args = parser.parse_args()
     
-    run_portfolio_backtest(args.days, args.capital, trend_filter_period=args.trend_filter)
+    run_portfolio_backtest(args.days, args.capital, trend_filter_period=args.trend_filter, realistic=args.realistic)

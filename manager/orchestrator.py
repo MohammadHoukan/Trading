@@ -12,6 +12,8 @@ from shared.config import load_config, get_redis_params
 from manager.risk_engine import RiskEngine
 from manager.regime_filter import RegimeFilter
 
+COMMAND_STREAM = 'swarm:commands'
+
 class Orchestrator:
     def __init__(self, config_path='config/settings.yaml'):
         # Load Config (with env substitution)
@@ -200,10 +202,16 @@ class Orchestrator:
     def broadcast_command(self, cmd, target='all'):
         """Broadcast command to workers. Returns True on success, False on failure."""
         message = {'command': cmd, 'target': target}
-        success = self.bus.publish(self.config['redis']['channels']['command'], message)
-        if not success:
+        stream_id = self.bus.xadd(COMMAND_STREAM, message)
+        stream_success = stream_id is not None
+        if not stream_success:
+            self.logger.error(f"Failed to enqueue command {cmd} to stream for {target}")
+
+        pubsub_success = self.bus.publish(self.config['redis']['channels']['command'], message)
+        if not pubsub_success:
             self.logger.error(f"Failed to broadcast command {cmd} to {target}")
-        return success
+
+        return stream_success or pubsub_success
 
     def shutdown(self):
         self.logger.info("Shutting down... sending STOP to all workers.")

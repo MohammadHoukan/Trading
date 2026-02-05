@@ -118,8 +118,15 @@ def optimize(
             except Exception as e:
                 pass
                 
+    if not results:
+        logger.error("No successful optimization runs; verify data and parameter ranges.")
+        return None
+
     # Sort by PnL
     df = pd.DataFrame(results)
+    if df.empty:
+        logger.error("Optimization produced an empty result set.")
+        return None
     df = df.sort_values('pnl', ascending=False)
     
     best = df.iloc[0]
