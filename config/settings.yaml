@@ -1,0 +1,20 @@
+exchange:
+  name: binance
+  mode: testnet  # 'live' or 'testnet'
+  api_key: "${BINANCE_API_KEY}"
+  secret: "${BINANCE_SECRET_KEY}"
+
+swarm:
+  base_currency: "${BASE_CURRENCY:-USDT}"
+  max_concurrency: ${MAX_CONCURRENCY:-5}
+  risk_per_bot: ${RISK_PER_BOT:-100.0}
+  loop_interval: ${LOOP_INTERVAL:-10}
+
+redis:
+  host: "${REDIS_HOST:-localhost}"
+  port: ${REDIS_PORT:-6379}
+  db: ${REDIS_DB:-0}
+  channels:
+    command: "swarm:cmd"
+    status: "swarm:status"
+    market_data: "swarm:market"

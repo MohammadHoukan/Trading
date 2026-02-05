@@ -1,0 +1,18 @@
+{
+    "SOL/USDT": {
+        "enabled": true,
+        "grid_levels": 20,
+        "lower_limit": 18.0,
+        "upper_limit": 25.0,
+        "amount_per_grid": 1.0,
+        "stop_loss": 17.5
+    },
+    "ETH/USDT": {
+        "enabled": false,
+        "grid_levels": 30,
+        "lower_limit": 1500.0,
+        "upper_limit": 2000.0,
+        "amount_per_grid": 0.01,
+        "stop_loss": 1450.0
+    }
+}
