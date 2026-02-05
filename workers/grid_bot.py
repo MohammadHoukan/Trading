@@ -21,6 +21,8 @@ import threading
 STALE_DATA_THRESHOLD_SECONDS = 15
 COMMAND_STREAM = 'swarm:commands'
 COMMAND_GROUP = 'workers'
+COMMAND_BATCH_SIZE = 10
+PENDING_MIN_IDLE_MS = 30_000
 
 class GridBot:
     def __init__(self, symbol, grids, config_path='config/settings.yaml'):
@@ -160,23 +162,72 @@ class GridBot:
             self.logger.error(f"Failed to load strategies: {e}")
         return None
 
-    def _validate_strategy_params(self):
+    def _validate_strategy_params(self, strategy_params=None, grid_levels=None):
+        strategy_params = strategy_params if strategy_params is not None else self.strategy_params
+        grid_levels = self.grid_levels if grid_levels is None else grid_levels
+
         required = ['lower_limit', 'upper_limit']
         for key in required:
-            if key not in self.strategy_params:
+            if key not in strategy_params:
                 raise ValueError(f"Strategy missing required key: {key}")
 
-        if not isinstance(self.grid_levels, int) or self.grid_levels <= 0:
+        if not isinstance(grid_levels, int) or grid_levels <= 0:
             raise ValueError("grid_levels must be a positive integer")
 
-        lower = self.strategy_params['lower_limit']
-        upper = self.strategy_params['upper_limit']
+        lower = strategy_params['lower_limit']
+        upper = strategy_params['upper_limit']
+        if not isinstance(lower, (int, float)) or isinstance(lower, bool):
+            raise ValueError("lower_limit must be numeric")
+        if not isinstance(upper, (int, float)) or isinstance(upper, bool):
+            raise ValueError("upper_limit must be numeric")
         if lower >= upper:
             raise ValueError("lower_limit must be less than upper_limit")
 
-        amount = self.strategy_params.get('amount_per_grid', None)
+        amount = strategy_params.get('amount_per_grid', None)
         if amount is not None and amount <= 0:
             raise ValueError("amount_per_grid must be > 0")
+
+    def _coerce_param_update(self, new_params: dict) -> dict:
+        """Normalize and validate supported runtime parameter updates."""
+        valid_keys = {'lower_limit', 'upper_limit', 'grid_levels', 'amount_per_grid', 'stop_loss'}
+        invalid_keys = set(new_params.keys()) - valid_keys
+        if invalid_keys:
+            self.logger.warning(f"Ignoring invalid parameter keys: {invalid_keys}")
+
+        filtered = {k: v for k, v in new_params.items() if k in valid_keys}
+        normalized = {}
+
+        for key, value in filtered.items():
+            if key == 'grid_levels':
+                if isinstance(value, bool):
+                    raise ValueError("grid_levels must be a positive integer")
+                if isinstance(value, int):
+                    level_val = value
+                elif isinstance(value, float) and value.is_integer():
+                    level_val = int(value)
+                elif isinstance(value, str):
+                    level_val = int(value.strip())
+                else:
+                    raise ValueError("grid_levels must be a positive integer")
+                if level_val <= 0:
+                    raise ValueError("grid_levels must be a positive integer")
+                normalized[key] = level_val
+                continue
+
+            if key == 'stop_loss' and value is None:
+                normalized[key] = None
+                continue
+
+            if isinstance(value, bool):
+                raise ValueError(f"{key} must be numeric")
+            if isinstance(value, (int, float)):
+                normalized[key] = float(value)
+            elif isinstance(value, str):
+                normalized[key] = float(value.strip())
+            else:
+                raise ValueError(f"{key} must be numeric")
+
+        return normalized
 
     def _log_grid_event(self, event_type: str, side: str, price: float, amount: float,
                         grid_level: int, order_id: str = None, market_price: float = None):
@@ -237,66 +288,69 @@ class GridBot:
         """
         self.logger.info(f"Applying parameter update: {new_params}")
 
-        # Validate new parameters before applying
-        valid_keys = {'lower_limit', 'upper_limit', 'grid_levels', 'amount_per_grid', 'stop_loss'}
-        invalid_keys = set(new_params.keys()) - valid_keys
-        if invalid_keys:
-            self.logger.warning(f"Ignoring invalid parameter keys: {invalid_keys}")
-            new_params = {k: v for k, v in new_params.items() if k in valid_keys}
+        try:
+            normalized = self._coerce_param_update(new_params)
+        except Exception as e:
+            self.logger.error(f"Rejected parameter update: {e}")
+            return
 
-        if not new_params:
+        if not normalized:
             self.logger.warning("No valid parameters to update")
             return
 
-        try:
-            # 1. Remember current state and pause
-            was_paused = self.paused
-            self.paused = True
+        candidate_params = dict(self.strategy_params)
+        candidate_params.update(normalized)
+        candidate_grid_levels = normalized.get('grid_levels', self.grid_levels)
 
-            # 2. Cancel all open orders
+        try:
+            self._validate_strategy_params(candidate_params, candidate_grid_levels)
+        except Exception as e:
+            self.logger.error(f"Rejected parameter update: {e}")
+            return
+
+        # Fetch price before canceling orders to avoid destructive transitions on stale/failed data.
+        ticker = self.order_manager.fetch_ticker(self.symbol)
+        if not ticker:
+            self.logger.error("Failed to fetch ticker for grid recalculation")
+            return
+
+        current_price = ticker.get('last')
+        if current_price is None or current_price <= 0:
+            self.logger.error("Invalid ticker price for grid recalculation")
+            return
+
+        old_strategy_params = dict(self.strategy_params)
+        old_grid_levels = self.grid_levels
+        was_paused = self.paused
+        self.paused = True
+
+        try:
+            # 1. Cancel all open orders
             self.cancel_open_orders()
 
-            # 3. Update parameters
-            for key, value in new_params.items():
-                old_value = self.strategy_params.get(key)
-                self.strategy_params[key] = value
-                self.logger.info(f"Updated {key}: {old_value} -> {value}")
-
-            # Update grid_levels instance variable if changed
-            if 'grid_levels' in new_params:
-                self.grid_levels = new_params['grid_levels']
-
-            # 4. Get current price and recalculate grid
-            ticker = self.order_manager.fetch_ticker(self.symbol)
-            if not ticker:
-                self.logger.error("Failed to fetch ticker for grid recalculation")
-                self.paused = was_paused
-                return
-
-            current_price = ticker.get('last')
-            if not current_price:
-                self.logger.error("No price in ticker response")
-                self.paused = was_paused
-                return
-
-            # Reset grid state
+            # 2. Apply and rebuild with validated parameters
+            self.strategy_params = candidate_params
+            self.grid_levels = candidate_grid_levels
             self.grids = []
             self.active_orders = set()
-
-            # 5. Recalculate grid levels
             self.calculate_grid_levels(current_price)
-
-            # 6. Place new orders
+            if not self.grids:
+                raise RuntimeError("Grid calculation produced no levels")
             self.place_initial_orders(current_price)
-
             self.logger.info(f"Parameter update complete. New grid: {len(self.grids)} levels")
 
-            # 7. Resume if wasn't paused before
-            self.paused = was_paused
-
         except Exception as e:
-            self.logger.error(f"Failed to apply parameter update: {e}")
-            # Try to resume normal operation
+            self.logger.error(f"Failed to apply parameter update: {e}. Rolling back.")
+            self.strategy_params = old_strategy_params
+            self.grid_levels = old_grid_levels
+            self.grids = []
+            self.active_orders = set()
+            self.calculate_grid_levels(current_price)
+            if self.grids:
+                self.place_initial_orders(current_price)
+            else:
+                self.logger.critical("Rollback failed: could not restore previous grid state")
+        finally:
             self.paused = was_paused
 
     def _has_existing_order(self, grid_index, side):
@@ -663,15 +717,67 @@ class GridBot:
     def _check_stream_commands(self):
         """Check Redis Streams for reliable command delivery."""
         try:
+            recovered = self._recover_pending_stream_commands(count=COMMAND_BATCH_SIZE)
+            self._process_stream_messages(recovered)
+
             messages = self.bus.xreadgroup(
-                COMMAND_GROUP, self.worker_id, COMMAND_STREAM, 
-                count=10, block=1000  # Blocking 1s (prevents busy wait, allows heartbeats)
+                COMMAND_GROUP,
+                self.worker_id,
+                COMMAND_STREAM,
+                count=COMMAND_BATCH_SIZE,
+                block=1000,  # Blocking 1s (prevents busy wait, allows heartbeats)
             )
-            for msg_id, fields in messages:
-                self.handle_message(fields)
-                self.bus.xack(COMMAND_STREAM, COMMAND_GROUP, msg_id)
+            self._process_stream_messages(messages)
         except Exception as e:
             self.logger.error(f"Error reading stream commands: {e}")
+
+    def _process_stream_messages(self, messages):
+        if not messages:
+            return
+        for msg_id, fields in messages:
+            self.handle_message(fields)
+            self.bus.xack(COMMAND_STREAM, COMMAND_GROUP, msg_id)
+
+    def _recover_pending_stream_commands(self, count=COMMAND_BATCH_SIZE):
+        """
+        Recover stale pending stream commands after reconnect/restart.
+
+        Uses XAUTOCLAIM when available; falls back to XPENDING+XCLAIM.
+        """
+        claimed = self.bus.xautoclaim(
+            COMMAND_STREAM,
+            COMMAND_GROUP,
+            self.worker_id,
+            min_idle_time=PENDING_MIN_IDLE_MS,
+            start_id='0-0',
+            count=count,
+        )
+        if claimed is None:
+            # Fallback for Redis versions without XAUTOCLAIM.
+            pending = self.bus.xpending_range(
+                COMMAND_STREAM,
+                COMMAND_GROUP,
+                min_id='-',
+                max_id='+',
+                count=count,
+            )
+            claim_ids = []
+            for entry in pending:
+                msg_id = entry.get('message_id')
+                idle_ms = entry.get('time_since_delivered', 0)
+                if msg_id and idle_ms >= PENDING_MIN_IDLE_MS:
+                    claim_ids.append(msg_id)
+            claimed = self.bus.xclaim(
+                COMMAND_STREAM,
+                COMMAND_GROUP,
+                self.worker_id,
+                min_idle_time=PENDING_MIN_IDLE_MS,
+                message_ids=claim_ids,
+            )
+
+        if claimed:
+            self.logger.info(f"Recovered {len(claimed)} pending stream command(s)")
+        return claimed or []
 
     def _check_stale_data(self) -> bool:
         """

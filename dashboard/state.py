@@ -2,20 +2,37 @@ import json
 
 
 DEFAULT_STALE_AFTER_SECONDS = 30
+COMMAND_STREAM = 'swarm:commands'
 
 
-def broadcast_stop(redis_client, command_channel):
+def broadcast_stop(redis_client, command_channel, command_stream=COMMAND_STREAM):
     """Broadcast a STOP-all command and return (ok, message)."""
-    try:
-        receivers = redis_client.publish(
-            command_channel,
-            json.dumps({'command': 'STOP', 'target': 'all'}),
-        )
-    except Exception as exc:
-        return False, f"Failed to broadcast STOP: {exc}"
+    payload = {'command': 'STOP', 'target': 'all'}
+    stream_ok = False
+    pubsub_ok = False
+    pubsub_receivers = 0
+    errors = []
 
-    if isinstance(receivers, int) and receivers > 0:
-        return True, f"STOP delivered to {receivers} subscriber(s)."
+    try:
+        stream_id = redis_client.xadd(command_stream, payload, maxlen=1000)
+        stream_ok = stream_id is not None
+    except Exception as exc:
+        errors.append(f"stream enqueue failed: {exc}")
+
+    try:
+        pubsub_receivers = redis_client.publish(command_channel, json.dumps(payload))
+        pubsub_ok = isinstance(pubsub_receivers, int) and pubsub_receivers > 0
+    except Exception as exc:
+        errors.append(f"pubsub broadcast failed: {exc}")
+
+    if stream_ok and pubsub_ok:
+        return True, f"STOP enqueued and delivered to {pubsub_receivers} subscriber(s)."
+    if stream_ok:
+        return True, "STOP enqueued to reliable stream; workers will consume on reconnect."
+    if pubsub_ok:
+        return True, f"STOP delivered to {pubsub_receivers} subscriber(s)."
+    if errors:
+        return False, f"Failed to broadcast STOP: {'; '.join(errors)}"
     return False, "STOP not delivered: no active command subscribers."
 
 

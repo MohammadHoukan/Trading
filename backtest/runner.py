@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from backtest.data_fetcher import fetch_ohlcv
 from backtest.simulator import GridSimulator
+from backtest.execution_model import ExecutionModel
 from backtest.metrics import calculate_metrics, format_metrics
 
 logging.basicConfig(
@@ -47,7 +48,8 @@ def run_backtest(
     initial_capital: float,
     stop_loss: float | None,
     save_trades: bool,
-    rolling: bool = False
+    rolling: bool = False,
+    realistic: bool = False,
 ):
     """Run a single backtest."""
     print(f"\n📊 Fetching {days} days of {timeframe} data for {symbol}...")
@@ -66,6 +68,10 @@ def run_backtest(
         print(f"   Stop-Loss: ${stop_loss:.2f}")
     if rolling:
         print(f"   Mode: ROLLING (infinity grids)")
+    if realistic:
+        print(f"   Execution: REALISTIC (slippage/spread/partial fills)")
+
+    execution_model = ExecutionModel(enabled=True) if realistic else None
     
     simulator = GridSimulator(
         lower_limit=lower_limit,
@@ -74,7 +80,8 @@ def run_backtest(
         amount_per_grid=amount_per_grid,
         initial_capital=initial_capital,
         stop_loss=stop_loss,
-        rolling=rolling
+        rolling=rolling,
+        execution_model=execution_model
     )
     
     # Run backtest
@@ -136,6 +143,7 @@ def main():
     parser.add_argument('--stop-loss', '-s', type=float, help='Stop-loss price')
     parser.add_argument('--save-trades', action='store_true', help='Save trades to CSV')
     parser.add_argument('--rolling', '-r', action='store_true', help='Enable rolling/infinity grids')
+    parser.add_argument('--realistic', action='store_true', help='Enable realistic execution model')
     
     args = parser.parse_args()
     
@@ -175,7 +183,8 @@ def main():
         initial_capital=args.capital,
         stop_loss=stop_loss,
         save_trades=args.save_trades,
-        rolling=rolling
+        rolling=rolling,
+        realistic=args.realistic
     )
 
 

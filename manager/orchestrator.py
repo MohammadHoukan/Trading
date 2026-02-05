@@ -235,12 +235,18 @@ class Orchestrator:
         }
 
         stream_id = self.bus.xadd(COMMAND_STREAM, message)
-        if stream_id:
+        stream_success = stream_id is not None
+        if not stream_success:
+            self.logger.error(f"Failed to enqueue UPDATE_PARAMS to stream for {worker_id}")
+
+        pubsub_success = self.bus.publish(self.config['redis']['channels']['command'], message)
+        if not pubsub_success:
+            self.logger.error(f"Failed to publish UPDATE_PARAMS for {worker_id}")
+
+        if stream_success or pubsub_success:
             self.logger.info(f"Sent UPDATE_PARAMS to {worker_id}: {params}")
             return True
-        else:
-            self.logger.error(f"Failed to send UPDATE_PARAMS to {worker_id}")
-            return False
+        return False
 
     def update_symbol_params(self, symbol: str, params: dict):
         """

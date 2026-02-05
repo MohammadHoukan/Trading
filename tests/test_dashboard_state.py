@@ -13,6 +13,7 @@ from dashboard.state import (
 
 def test_broadcast_stop_success():
     mock_redis = MagicMock()
+    mock_redis.xadd.return_value = "1-0"
     mock_redis.publish.return_value = 2
 
     ok, message = broadcast_stop(mock_redis, 'swarm:cmd')
@@ -23,6 +24,7 @@ def test_broadcast_stop_success():
 
 def test_broadcast_stop_no_subscribers():
     mock_redis = MagicMock()
+    mock_redis.xadd.return_value = None
     mock_redis.publish.return_value = 0
 
     ok, message = broadcast_stop(mock_redis, 'swarm:cmd')
@@ -33,12 +35,35 @@ def test_broadcast_stop_no_subscribers():
 
 def test_broadcast_stop_redis_error():
     mock_redis = MagicMock()
+    mock_redis.xadd.side_effect = RuntimeError("redis down")
     mock_redis.publish.side_effect = RuntimeError("redis down")
 
     ok, message = broadcast_stop(mock_redis, 'swarm:cmd')
 
     assert ok is False
     assert "Failed to broadcast STOP" in message
+
+
+def test_broadcast_stop_stream_only_success():
+    mock_redis = MagicMock()
+    mock_redis.xadd.return_value = "1-0"
+    mock_redis.publish.return_value = 0
+
+    ok, message = broadcast_stop(mock_redis, 'swarm:cmd')
+
+    assert ok is True
+    assert "reliable stream" in message
+
+
+def test_broadcast_stop_pubsub_only_success():
+    mock_redis = MagicMock()
+    mock_redis.xadd.side_effect = RuntimeError("stream unavailable")
+    mock_redis.publish.return_value = 1
+
+    ok, message = broadcast_stop(mock_redis, 'swarm:cmd')
+
+    assert ok is True
+    assert "delivered to 1" in message
 
 
 def test_parse_worker_rows_filters_stale_and_bad_records():

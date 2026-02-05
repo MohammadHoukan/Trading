@@ -1,6 +1,6 @@
 
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, call
 import sys
 import os
 import json
@@ -98,6 +98,11 @@ class TestGridLogic(unittest.TestCase):
         self.config_patch = patch('workers.grid_bot.load_config', return_value=self.config)
         self.config_patch.start()
         self.addCleanup(self.config_patch.stop)
+
+        self.db_patch = patch('workers.grid_bot.Database')
+        self.mock_db_cls = self.db_patch.start()
+        self.addCleanup(self.db_patch.stop)
+        self.mock_db_cls.return_value = MagicMock()
         
         # Override _load_strategy_params to return our test strategy
         GridBot._load_strategy_params = MagicMock(return_value=self.strategy['SOL/USDT'])
@@ -293,6 +298,77 @@ class TestGridLogic(unittest.TestCase):
 
         # Verify grid_levels was updated
         self.assertEqual(self.bot.grid_levels, 8)
+
+    def test_apply_param_update_rejects_invalid_grid_levels_type_without_clearing_orders(self):
+        self.bot.place_initial_orders(20.0)
+        before_ids = {o['id'] for o in self.bot.order_manager.fetch_open_orders("SOL/USDT")}
+        before_levels = self.bot.grid_levels
+
+        self.bot._apply_param_update({'grid_levels': 'not-an-int'})
+
+        after_ids = {o['id'] for o in self.bot.order_manager.fetch_open_orders("SOL/USDT")}
+        self.assertEqual(after_ids, before_ids)
+        self.assertEqual(self.bot.grid_levels, before_levels)
+
+    def test_apply_param_update_rejects_inverted_range_without_clearing_orders(self):
+        self.bot.place_initial_orders(20.0)
+        before_ids = {o['id'] for o in self.bot.order_manager.fetch_open_orders("SOL/USDT")}
+        before_limits = (
+            self.bot.strategy_params['lower_limit'],
+            self.bot.strategy_params['upper_limit'],
+        )
+
+        self.bot._apply_param_update({'lower_limit': 30.0, 'upper_limit': 10.0})
+
+        after_ids = {o['id'] for o in self.bot.order_manager.fetch_open_orders("SOL/USDT")}
+        self.assertEqual(after_ids, before_ids)
+        self.assertEqual(
+            (self.bot.strategy_params['lower_limit'], self.bot.strategy_params['upper_limit']),
+            before_limits,
+        )
+
+    def test_check_stream_commands_processes_recovered_before_new_messages(self):
+        self.bot.handle_message = MagicMock()
+        self.bot.bus.xautoclaim = MagicMock(return_value=[
+            ('1-0', {'command': 'PAUSE', 'target': self.bot.worker_id}),
+        ])
+        self.bot.bus.xreadgroup = MagicMock(return_value=[
+            ('2-0', {'command': 'RESUME', 'target': self.bot.worker_id}),
+        ])
+        self.bot.bus.xack = MagicMock(return_value=1)
+
+        self.bot._check_stream_commands()
+
+        self.bot.handle_message.assert_has_calls([
+            call({'command': 'PAUSE', 'target': self.bot.worker_id}),
+            call({'command': 'RESUME', 'target': self.bot.worker_id}),
+        ])
+        self.assertEqual(self.bot.bus.xack.call_count, 2)
+
+    def test_check_stream_commands_fallbacks_to_xclaim_when_xautoclaim_unsupported(self):
+        self.bot.handle_message = MagicMock()
+        self.bot.bus.xautoclaim = MagicMock(return_value=None)
+        self.bot.bus.xpending_range = MagicMock(return_value=[
+            {
+                'message_id': '9-0',
+                'consumer': 'dead_worker',
+                'time_since_delivered': 60_000,
+                'times_delivered': 1,
+            }
+        ])
+        self.bot.bus.xclaim = MagicMock(return_value=[
+            ('9-0', {'command': 'STOP', 'target': self.bot.worker_id}),
+        ])
+        self.bot.bus.xreadgroup = MagicMock(return_value=[])
+        self.bot.bus.xack = MagicMock(return_value=1)
+
+        self.bot._check_stream_commands()
+
+        self.bot.bus.xclaim.assert_called_once()
+        self.bot.handle_message.assert_called_once_with(
+            {'command': 'STOP', 'target': self.bot.worker_id}
+        )
+        self.bot.bus.xack.assert_called_once_with('swarm:commands', 'workers', '9-0')
 
 if __name__ == '__main__':
     unittest.main()

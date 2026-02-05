@@ -153,3 +153,67 @@ class RedisBus:
             self.logger.error(f"Failed to xack {message_id}: {e}")
             return 0
 
+    def xautoclaim(self, stream, group, consumer, min_idle_time, start_id='0-0', count=10):
+        """
+        Auto-claim stale pending messages for a consumer.
+
+        Returns:
+            List of (message_id, fields) tuples
+            None if xautoclaim is unsupported by Redis server/client
+        """
+        try:
+            result = self.r.xautoclaim(
+                stream,
+                group,
+                consumer,
+                min_idle_time=min_idle_time,
+                start_id=start_id,
+                count=count,
+            )
+            # redis-py returns (next_start_id, [(id, fields), ...], [deleted_ids?]).
+            messages = result[1] if isinstance(result, tuple) and len(result) >= 2 else result
+            if not messages:
+                return []
+            return [(msg_id, fields) for msg_id, fields in messages]
+        except AttributeError:
+            return None
+        except Exception as e:
+            text = str(e).lower()
+            if 'unknown command' in text or 'xautoclaim' in text and 'unsupported' in text:
+                return None
+            self.logger.error(f"Failed to xautoclaim from {stream}: {e}")
+            return []
+
+    def xpending_range(self, stream, group, min_id='-', max_id='+', count=10, consumer=None):
+        """Fetch pending entries metadata for a stream consumer group."""
+        try:
+            return self.r.xpending_range(
+                stream,
+                group,
+                min=min_id,
+                max=max_id,
+                count=count,
+                consumername=consumer,
+            )
+        except Exception as e:
+            self.logger.error(f"Failed to xpending_range from {stream}: {e}")
+            return []
+
+    def xclaim(self, stream, group, consumer, min_idle_time, message_ids):
+        """Claim pending messages and return list of (message_id, fields)."""
+        if not message_ids:
+            return []
+        try:
+            claimed = self.r.xclaim(
+                stream,
+                group,
+                consumer,
+                min_idle_time=min_idle_time,
+                message_ids=message_ids,
+            )
+            if not claimed:
+                return []
+            return [(msg_id, fields) for msg_id, fields in claimed]
+        except Exception as e:
+            self.logger.error(f"Failed to xclaim from {stream}: {e}")
+            return []

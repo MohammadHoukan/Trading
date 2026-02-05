@@ -118,3 +118,59 @@ def test_redisbus_hgetall_returns_none_on_redis_error():
         result = bus.hgetall('workers:data')
 
         assert result is None
+
+
+def test_redisbus_xautoclaim_normalizes_messages():
+    with patch('redis.Redis') as mock_redis:
+        mock_instance = MagicMock()
+        mock_redis.return_value = mock_instance
+        mock_instance.xautoclaim.return_value = (
+            '0-0',
+            [('1-0', {'command': 'STOP', 'target': 'all'})],
+            [],
+        )
+
+        from shared.messaging import RedisBus
+
+        bus = RedisBus(host='localhost', port=6379, db=0)
+        result = bus.xautoclaim('swarm:commands', 'workers', 'w1', 30000)
+
+        assert result == [('1-0', {'command': 'STOP', 'target': 'all'})]
+
+
+def test_redisbus_xautoclaim_returns_none_when_unsupported():
+    with patch('redis.Redis') as mock_redis:
+        mock_instance = MagicMock()
+        mock_redis.return_value = mock_instance
+        mock_instance.xautoclaim.side_effect = RuntimeError("ERR unknown command 'XAUTOCLAIM'")
+
+        from shared.messaging import RedisBus
+
+        bus = RedisBus(host='localhost', port=6379, db=0)
+        result = bus.xautoclaim('swarm:commands', 'workers', 'w1', 30000)
+
+        assert result is None
+
+
+def test_redisbus_xpending_range_and_xclaim():
+    with patch('redis.Redis') as mock_redis:
+        mock_instance = MagicMock()
+        mock_redis.return_value = mock_instance
+        mock_instance.xpending_range.return_value = [
+            {
+                'message_id': '1-0',
+                'consumer': 'old',
+                'time_since_delivered': 45000,
+                'times_delivered': 1,
+            }
+        ]
+        mock_instance.xclaim.return_value = [('1-0', {'command': 'PAUSE', 'target': 'w1'})]
+
+        from shared.messaging import RedisBus
+
+        bus = RedisBus(host='localhost', port=6379, db=0)
+        pending = bus.xpending_range('swarm:commands', 'workers', count=5)
+        claimed = bus.xclaim('swarm:commands', 'workers', 'w1', 30000, ['1-0'])
+
+        assert len(pending) == 1
+        assert claimed == [('1-0', {'command': 'PAUSE', 'target': 'w1'})]

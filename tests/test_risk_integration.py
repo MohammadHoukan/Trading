@@ -160,5 +160,39 @@ class TestRiskEngineIntegration(unittest.TestCase):
 
         self.assertFalse(ok)
 
+    def test_update_worker_params_succeeds_when_pubsub_fallback_works(self):
+        orch = Orchestrator.__new__(Orchestrator)
+        orch.config = {'redis': {'channels': {'command': 'cmd'}}}
+        orch.bus = MagicMock()
+        orch.logger = MagicMock()
+
+        orch.bus.xadd.return_value = None
+        orch.bus.publish.return_value = True
+
+        ok = orch.update_worker_params('w1', {'grid_levels': 8})
+
+        self.assertTrue(ok)
+        orch.bus.xadd.assert_called_once_with(
+            'swarm:commands',
+            {'command': 'UPDATE_PARAMS', 'target': 'w1', 'params': {'grid_levels': 8}},
+        )
+        orch.bus.publish.assert_called_once_with(
+            'cmd',
+            {'command': 'UPDATE_PARAMS', 'target': 'w1', 'params': {'grid_levels': 8}},
+        )
+
+    def test_update_worker_params_fails_when_stream_and_pubsub_fail(self):
+        orch = Orchestrator.__new__(Orchestrator)
+        orch.config = {'redis': {'channels': {'command': 'cmd'}}}
+        orch.bus = MagicMock()
+        orch.logger = MagicMock()
+
+        orch.bus.xadd.return_value = None
+        orch.bus.publish.return_value = False
+
+        ok = orch.update_worker_params('w1', {'grid_levels': 8})
+
+        self.assertFalse(ok)
+
 if __name__ == '__main__':
     unittest.main()
