@@ -4,8 +4,13 @@ Grid trading simulation engine for backtesting.
 import pandas as pd
 import numpy as np
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 import logging
+
+try:
+    from backtest.execution_model import ExecutionModel
+except ImportError:
+    ExecutionModel = None
 
 logger = logging.getLogger(__name__)
 
@@ -229,30 +234,42 @@ class GridSimulator:
                     for level in list(buy_levels):
                         grid_price = self.grid_prices[level]
                         if low <= grid_price:
+                            # Simulate realistic fill if model is enabled
+                            fill_amount = self.amount_per_grid
+                            fill_price = grid_price
+                            was_filled = True
+                            
+                            if self.execution_model:
+                                fill_amount, fill_price, was_filled = self.execution_model.simulate_fill(
+                                    'buy', grid_price, self.amount_per_grid, close
+                                )
+                            
+                            if not was_filled or fill_amount <= 0:
+                                continue
+
                             # Buy filled!
-                            cost = grid_price * self.amount_per_grid
+                            cost = fill_price * fill_amount
                             fee = cost * (self.fees_percent / 100)
                             
                             if capital >= cost + fee:
                                 capital -= cost + fee
                                 
                                 # Update inventory and avg cost
-                                # Fix #7: Include buy fee in cost basis for accurate PnL
-                                total_cost = (avg_cost * inventory) + (grid_price * self.amount_per_grid) + fee
-                                inventory += self.amount_per_grid
+                                total_cost = (avg_cost * inventory) + cost + fee
+                                inventory += fill_amount
                                 avg_cost = total_cost / inventory if inventory > 0 else 0.0
                                 
                                 trades.append(Trade(
                                     timestamp=timestamp,
                                     side='buy',
-                                    price=grid_price,
-                                    amount=self.amount_per_grid,
+                                    price=fill_price,
+                                    amount=fill_amount,
                                     grid_level=level
                                 ))
                                 
                                 filled_buys.append(level)
 
-                                self._log_event('FILL', 'buy', grid_price, self.amount_per_grid, level, low, timestamp,
+                                self._log_event('FILL', 'buy', fill_price, fill_amount, level, low, timestamp,
                                                inventory, avg_cost, realized_pnl)
 
                                 # Place sell order one level higher
@@ -275,16 +292,29 @@ class GridSimulator:
                     filled_sells = []
                     for level in list(sell_levels):
                         grid_price = self.grid_prices[level]
-                        if high >= grid_price and inventory >= self.amount_per_grid:
+                        if high >= grid_price and inventory > 0:
+                            # Simulate realistic fill if model is enabled
+                            order_amount = min(self.amount_per_grid, inventory)
+                            fill_amount = order_amount
+                            fill_price = grid_price
+                            was_filled = True
+                            
+                            if self.execution_model:
+                                fill_amount, fill_price, was_filled = self.execution_model.simulate_fill(
+                                    'sell', grid_price, order_amount, close
+                                )
+                            
+                            if not was_filled or fill_amount <= 0:
+                                continue
+
                             # Sell filled!
-                            amount = min(self.amount_per_grid, inventory)
-                            proceeds = grid_price * amount
+                            proceeds = fill_price * fill_amount
                             fee = proceeds * (self.fees_percent / 100)
                             
-                            pnl = (grid_price - avg_cost) * amount - fee
+                            pnl = (fill_price - avg_cost) * fill_amount - fee
                             realized_pnl += pnl
                             capital += proceeds - fee
-                            inventory -= amount
+                            inventory -= fill_amount
                             
                             if inventory <= 0:
                                 inventory = 0.0
@@ -293,15 +323,15 @@ class GridSimulator:
                             trades.append(Trade(
                                 timestamp=timestamp,
                                 side='sell',
-                                price=grid_price,
-                                amount=amount,
+                                price=fill_price,
+                                amount=fill_amount,
                                 grid_level=level,
                                 pnl=pnl
                             ))
                             
                             filled_sells.append(level)
 
-                            self._log_event('FILL', 'sell', grid_price, amount, level, high, timestamp,
+                            self._log_event('FILL', 'sell', fill_price, fill_amount, level, high, timestamp,
                                            inventory, avg_cost, realized_pnl)
 
                             # Place buy order one level lower
