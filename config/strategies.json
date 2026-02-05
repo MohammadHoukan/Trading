@@ -5,7 +5,8 @@
         "lower_limit": 18.0,
         "upper_limit": 25.0,
         "amount_per_grid": 1.0,
-        "stop_loss": 17.5
+        "stop_loss": 17.5,
+        "rolling_grids": true
     },
     "ETH/USDT": {
         "enabled": false,

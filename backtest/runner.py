@@ -46,7 +46,8 @@ def run_backtest(
     amount_per_grid: float,
     initial_capital: float,
     stop_loss: float | None,
-    save_trades: bool
+    save_trades: bool,
+    rolling: bool = False
 ):
     """Run a single backtest."""
     print(f"\n📊 Fetching {days} days of {timeframe} data for {symbol}...")
@@ -63,6 +64,8 @@ def run_backtest(
     print(f"   Initial Capital: ${initial_capital:.2f}")
     if stop_loss:
         print(f"   Stop-Loss: ${stop_loss:.2f}")
+    if rolling:
+        print(f"   Mode: ROLLING (infinity grids)")
     
     simulator = GridSimulator(
         lower_limit=lower_limit,
@@ -70,7 +73,8 @@ def run_backtest(
         grid_levels=grid_levels,
         amount_per_grid=amount_per_grid,
         initial_capital=initial_capital,
-        stop_loss=stop_loss
+        stop_loss=stop_loss,
+        rolling=rolling
     )
     
     # Run backtest
@@ -131,6 +135,7 @@ def main():
     parser.add_argument('--capital', '-c', type=float, default=1000.0, help='Initial capital (default: 1000)')
     parser.add_argument('--stop-loss', '-s', type=float, help='Stop-loss price')
     parser.add_argument('--save-trades', action='store_true', help='Save trades to CSV')
+    parser.add_argument('--rolling', '-r', action='store_true', help='Enable rolling/infinity grids')
     
     args = parser.parse_args()
     
@@ -145,12 +150,14 @@ def main():
         grids = args.grids or strategy.get('grid_levels', 20)
         amount = args.amount or strategy.get('amount_per_grid', 0.1)
         stop_loss = args.stop_loss or strategy.get('stop_loss')
+        rolling = args.rolling or strategy.get('rolling_grids', False)
     else:
         lower = args.lower
         upper = args.upper
         grids = args.grids or 20
         amount = args.amount or 0.1
         stop_loss = args.stop_loss
+        rolling = args.rolling
     
     # Validate required params
     if lower is None or upper is None:
@@ -167,7 +174,8 @@ def main():
         amount_per_grid=amount,
         initial_capital=args.capital,
         stop_loss=stop_loss,
-        save_trades=args.save_trades
+        save_trades=args.save_trades,
+        rolling=rolling
     )
 
 

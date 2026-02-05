@@ -57,7 +57,8 @@ class GridSimulator:
         amount_per_grid: float,
         initial_capital: float = 1000.0,
         stop_loss: Optional[float] = None,
-        fees_percent: float = 0.1  # 0.1% per trade (Binance default)
+        fees_percent: float = 0.1,  # 0.1% per trade (Binance default)
+        rolling: bool = False  # Enable rolling/infinity grids
     ):
         """
         Initialize grid simulator.
@@ -70,6 +71,7 @@ class GridSimulator:
             initial_capital: Starting capital in quote currency (e.g., USDT)
             stop_loss: Stop-loss price (optional)
             fees_percent: Trading fee percentage
+            rolling: If True, grid shifts when price breaks bounds
         """
         self.lower_limit = lower_limit
         self.upper_limit = upper_limit
@@ -78,12 +80,14 @@ class GridSimulator:
         self.initial_capital = initial_capital
         self.stop_loss = stop_loss
         self.fees_percent = fees_percent
+        self.rolling = rolling
         
         # Calculate grid prices
         self.grid_step = (upper_limit - lower_limit) / grid_levels
         self.grid_prices = [lower_limit + i * self.grid_step for i in range(grid_levels + 1)]
         
-        logger.info(f"Grid: {grid_levels} levels from {lower_limit} to {upper_limit}, step={self.grid_step:.4f}")
+        mode_str = "ROLLING" if rolling else "FIXED"
+        logger.info(f"Grid ({mode_str}): {grid_levels} levels from {lower_limit} to {upper_limit}, step={self.grid_step:.4f}")
     
     def run(self, ohlcv_df: pd.DataFrame) -> BacktestResult:
         """
@@ -188,6 +192,12 @@ class GridSimulator:
                         # Place sell order one level higher
                         if level + 1 <= self.grid_levels:
                             sell_levels.add(level + 1)
+                        elif self.rolling:
+                            # Roll grid UP
+                            self.grid_prices.pop(0)
+                            new_top = self.grid_prices[-1] + self.grid_step
+                            self.grid_prices.append(new_top)
+                            sell_levels.add(len(self.grid_prices) - 1)
             
             for level in filled_buys:
                 buy_levels.discard(level)
@@ -225,6 +235,15 @@ class GridSimulator:
                     # Place buy order one level lower
                     if level - 1 >= 0:
                         buy_levels.add(level - 1)
+                    elif self.rolling:
+                        # Roll grid DOWN
+                        self.grid_prices.pop()
+                        new_bottom = self.grid_prices[0] - self.grid_step
+                        self.grid_prices.insert(0, new_bottom)
+                        buy_levels.add(0)
+                        # Adjust all level indices in buy_levels and sell_levels
+                        buy_levels = {l + 1 for l in buy_levels if l >= 0}
+                        sell_levels = {l + 1 for l in sell_levels}
             
             for level in filled_sells:
                 sell_levels.discard(level)

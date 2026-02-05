@@ -119,6 +119,12 @@ class GridBot:
         
         # Setup Redis Streams consumer group for reliable commands
         self.bus.create_consumer_group(COMMAND_STREAM, COMMAND_GROUP, start_id='$')
+        
+        # Rolling grids (infinity grids) settings
+        self.rolling_grids_enabled = self.strategy_params.get('rolling_grids', False)
+        self.grid_step = 0.0  # Calculated when grid is initialized
+        if self.rolling_grids_enabled:
+            self.logger.info("Rolling Grids ENABLED - grid will shift with price")
 
     def _renew_lock_loop(self):
         """Background thread to keep the API Key lock alive."""
@@ -163,6 +169,76 @@ class GridBot:
     def _has_existing_order(self, grid_index, side):
         grid = self.grids[grid_index]
         return any(order['side'] == side for order in grid['orders'])
+
+    def _roll_grid_up(self, amount):
+        """
+        Roll the grid UP when price breaks the top boundary.
+        - Cancel lowest buy order (now far away)
+        - Shift all grid levels up by one step
+        - Place new sell order at the new top
+        """
+        self.logger.info("📈 ROLLING GRID UP - Price broke top boundary")
+        
+        # Cancel the lowest buy order (grid index 0)
+        if self.grids and self.grids[0]['orders']:
+            for order_data in list(self.grids[0]['orders']):
+                if order_data['side'] == 'buy':
+                    try:
+                        self.order_manager.cancel_order(order_data['id'], self.symbol)
+                        self.logger.info(f"Cancelled bottom buy order at {order_data['price']:.4f}")
+                    except Exception as e:
+                        self.logger.error(f"Failed to cancel order: {e}")
+                    self.grids[0]['orders'].remove(order_data)
+                    self.active_orders.discard(order_data['id'])
+        
+        # Shift grid: remove bottom level, add new top level
+        old_top = self.grids[-1]['price']
+        new_top_price = old_top + self.grid_step
+        
+        self.grids.pop(0)  # Remove bottom
+        self.grids.append({
+            'price': new_top_price,
+            'orders': []
+        })
+        
+        # Place new sell order at the new top
+        self.logger.info(f"Grid shifted up. New range: [{self.grids[0]['price']:.4f}, {new_top_price:.4f}]")
+        self.place_order(len(self.grids) - 1, 'sell', amount)
+
+    def _roll_grid_down(self, amount):
+        """
+        Roll the grid DOWN when price breaks the bottom boundary.
+        - Cancel highest sell order (now far away)
+        - Shift all grid levels down by one step
+        - Place new buy order at the new bottom
+        """
+        self.logger.info("📉 ROLLING GRID DOWN - Price broke bottom boundary")
+        
+        # Cancel the highest sell order (last grid index)
+        if self.grids and self.grids[-1]['orders']:
+            for order_data in list(self.grids[-1]['orders']):
+                if order_data['side'] == 'sell':
+                    try:
+                        self.order_manager.cancel_order(order_data['id'], self.symbol)
+                        self.logger.info(f"Cancelled top sell order at {order_data['price']:.4f}")
+                    except Exception as e:
+                        self.logger.error(f"Failed to cancel order: {e}")
+                    self.grids[-1]['orders'].remove(order_data)
+                    self.active_orders.discard(order_data['id'])
+        
+        # Shift grid: remove top level, add new bottom level
+        old_bottom = self.grids[0]['price']
+        new_bottom_price = old_bottom - self.grid_step
+        
+        self.grids.pop()  # Remove top
+        self.grids.insert(0, {
+            'price': new_bottom_price,
+            'orders': []
+        })
+        
+        # Place new buy order at the new bottom
+        self.logger.info(f"Grid shifted down. New range: [{new_bottom_price:.4f}, {self.grids[-1]['price']:.4f}]")
+        self.place_order(0, 'buy', amount)
 
     def cancel_open_orders(self):
         try:
@@ -213,6 +289,9 @@ class GridBot:
             if target_idx <= self.grid_levels:  # Boundary Check
                 self.logger.info(f"Rebalancing: Placing SELL at level {target_idx}")
                 self.place_order(target_idx, 'sell', amount)
+            elif self.rolling_grids_enabled:
+                # At top boundary - roll grid up
+                self._roll_grid_up(amount)
             else:
                 self.logger.warning("Price above grid! No more levels to sell.")
         elif side == 'sell':
@@ -221,6 +300,9 @@ class GridBot:
             if target_idx >= 0:  # Boundary Check
                 self.logger.info(f"Rebalancing: Placing BUY at level {target_idx}")
                 self.place_order(target_idx, 'buy', amount)
+            elif self.rolling_grids_enabled:
+                # At bottom boundary - roll grid down
+                self._roll_grid_down(amount)
             else:
                 self.logger.warning("Price below grid! No more levels to buy.")
 
@@ -235,20 +317,26 @@ class GridBot:
             self.logger.error("grid_levels must be > 0 to calculate grids.")
             return
         
-        if current_price < lower or current_price > upper:
+        # In rolling mode, center grid around current price if outside bounds
+        if self.rolling_grids_enabled and (current_price < lower or current_price > upper):
+            range_size = upper - lower
+            lower = current_price - (range_size / 2)
+            upper = current_price + (range_size / 2)
+            self.logger.info(f"Rolling mode: Centering grid [{lower:.2f}, {upper:.2f}] around {current_price}")
+        elif current_price < lower or current_price > upper:
             self.logger.warning(f"Price {current_price} is out of bounds [{lower}, {upper}].")
             return
 
-        step = (upper - lower) / self.grid_levels
+        self.grid_step = (upper - lower) / self.grid_levels
         
         self.grids = []
         for i in range(self.grid_levels + 1):
-            price = lower + (i * step)
+            price = lower + (i * self.grid_step)
             self.grids.append({
                 'price': price,
                 'orders': [],  # List of order dicts
             })
-        self.logger.info(f"Calculated {len(self.grids)} grid levels.")
+        self.logger.info(f"Calculated {len(self.grids)} grid levels, step={self.grid_step:.4f}")
 
     def place_order(self, grid_index, side, amount):
         """Helper to place an order and track it in the grid."""
