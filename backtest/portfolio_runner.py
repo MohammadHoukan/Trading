@@ -10,6 +10,7 @@ import os
 import json
 import logging
 import pandas as pd
+import matplotlib.pyplot as plt
 from typing import Dict, List
 from datetime import datetime
 
@@ -143,6 +144,41 @@ def run_portfolio_backtest(
         print(f"║  {pair:<10} ${m.total_pnl:>9.2f} ({m.return_pct:>6.2f}%)       ║")
         
     print("╚══════════════════════════════════════════════════╝")
+    
+    # 3. Correlation Matrix
+    print("\n🔗 Correlation Matrix (Daily Returns):")
+    returns_df = pd.DataFrame()
+    for pair, res in results.items():
+        if not res.equity_curve.empty:
+            # Resample to daily for correlation
+            daily_equity = res.equity_curve.resample('D').last().ffill()
+            daily_returns = daily_equity.pct_change().fillna(0)
+            returns_df[pair] = daily_returns
+            
+    if not returns_df.empty:
+        corr_matrix = returns_df.corr()
+        print(corr_matrix.round(2))
+    
+    # 4. Visualization
+    print("\n🎨 Generating Portfolio Plot...")
+    plt.figure(figsize=(12, 8))
+    
+    # Plot individual equities (normalized to start)
+    for pair, res in results.items():
+        if not res.equity_curve.empty:
+            plt.plot(res.equity_curve.index, res.equity_curve, label=f"{pair} ({metrics_map[pair].return_pct:.1f}%)", alpha=0.6)
+            
+    # Plot Portfolio
+    plt.plot(combined_equity.index, combined_equity, label=f"Portfolio ({portfolio_return:.1f}%)", linewidth=2.5, color='black')
+    
+    plt.title(f"Portfolio Performance (Rollling Grid) - {days} Days")
+    plt.ylabel("Equity ($)")
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    
+    output_file = 'portfolio_performance.png'
+    plt.savefig(output_file)
+    print(f"Saved to {output_file}")
 
 
 if __name__ == '__main__':

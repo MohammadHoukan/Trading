@@ -6,6 +6,7 @@ import argparse
 import sys
 import os
 import logging
+import json
 import itertools
 import pandas as pd
 from typing import List, Dict, Tuple
@@ -27,7 +28,8 @@ def optimize(
     symbol: str, 
     days: int, 
     capital: float,
-    rolling: bool = True
+    rolling: bool = True,
+    save: bool = False
 ):
     print(f"\n🧪 Optimizing {symbol} over {days} days (Rolling={rolling})...")
     
@@ -132,13 +134,49 @@ def optimize(
     print(f"   Return: {best.return_pct:.2f}% (${best.pnl:.2f})")
     print(f"   Drawdown: {best.drawdown:.2f}%")
     
+    if save:
+        update_strategy_config(symbol, best, rolling)
+    
     return best
+
+
+def update_strategy_config(symbol: str, best_params: pd.Series, rolling: bool):
+    """Update strategies.json with optimized parameters."""
+    config_path = os.path.join(os.path.dirname(__file__), '..', 'config', 'strategies.json')
+    
+    try:
+        with open(config_path, 'r') as f:
+            strategies = json.load(f)
+            
+        if symbol not in strategies:
+            strategies[symbol] = {"enabled": True}
+            
+        # Update params
+        strategies[symbol].update({
+            "grid_levels": int(best_params.grids),
+            "lower_limit": float(f"{best_params.lower:.2f}"),
+            "upper_limit": float(f"{best_params.upper:.2f}"),
+            "amount_per_grid": float(f"{best_params.amount:.4f}"),
+            "rolling_grids": rolling,
+            # Set stop loss 5% below lower limit
+            "stop_loss": float(f"{best_params.lower * 0.95:.2f}")
+        })
+        
+        with open(config_path, 'w') as f:
+            json.dump(strategies, f, indent=4)
+            
+        print(f"\n💾 Saved optimized settings to config/strategies.json")
+        
+    except Exception as e:
+        logger.error(f"Failed to update config: {e}")
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--pair', required=True)
     parser.add_argument('--days', type=int, default=30)
     parser.add_argument('--capital', type=float, default=1000.0)
+    parser.add_argument('--save', action='store_true', help='Update strategies.json with best results')
     args = parser.parse_args()
     
-    optimize(args.pair, args.days, args.capital)
+    optimize(args.pair, args.days, args.capital, save=args.save)

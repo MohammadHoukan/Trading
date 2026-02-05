@@ -5,3 +5,4 @@ pandas_ta
 streamlit>=1.30.0
 pyyaml>=6.0
 python-dotenv>=1.0.0
+matplotlib>=3.0.0
