@@ -48,21 +48,23 @@ class Database:
         """Log an order to the database."""
         try:
             conn = self.get_connection()
-            cursor = conn.cursor()
-            cursor.execute('''
-            INSERT OR REPLACE INTO orders (order_id, symbol, side, price, amount, status, timestamp)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                order_data['id'],
-                order_data['symbol'],
-                order_data['side'],
-                order_data['price'],
-                order_data['amount'],
-                order_data['status'],
-                datetime.now().isoformat()
-            ))
-            conn.commit()
-            conn.close()
+            try:
+                cursor = conn.cursor()
+                cursor.execute('''
+                INSERT OR REPLACE INTO orders (order_id, symbol, side, price, amount, status, timestamp)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    order_data['id'],
+                    order_data['symbol'],
+                    order_data['side'],
+                    order_data['price'],
+                    order_data['amount'],
+                    order_data['status'],
+                    datetime.now().isoformat()
+                ))
+                conn.commit()
+            finally:
+                conn.close()
         except Exception as e:
             self.logger.error(f"DB Error log_order: {e}")
 
@@ -70,12 +72,14 @@ class Database:
         """Update worker heartbeat."""
         try:
             conn = self.get_connection()
-            cursor = conn.cursor()
-            cursor.execute('''
-            INSERT OR REPLACE INTO worker_status (worker_id, symbol, status, last_heartbeat, pnl)
-            VALUES (?, ?, ?, ?, ?)
-            ''', (worker_id, symbol, status, datetime.now().isoformat(), pnl))
-            conn.commit()
-            conn.close()
+            try:
+                cursor = conn.cursor()
+                cursor.execute('''
+                INSERT OR REPLACE INTO worker_status (worker_id, symbol, status, last_heartbeat, pnl)
+                VALUES (?, ?, ?, ?, ?)
+                ''', (worker_id, symbol, status, datetime.now().isoformat(), pnl))
+                conn.commit()
+            finally:
+                conn.close()
         except Exception as e:
             self.logger.error(f"DB Error update_worker_heartbeat: {e}")

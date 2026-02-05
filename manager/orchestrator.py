@@ -27,12 +27,21 @@ class Orchestrator:
         self.last_regime = None
         self.last_regime_check = 0
         self.rejected_workers = set()
+        self.stop_broadcast_sent = False
 
     def handle_worker_update(self, msg):
         """Process a single worker status update and persist it for the dashboard."""
         worker_id = msg.get('worker_id')
         symbol = msg.get('symbol')
+        status = msg.get('status', 'RUNNING')
+        
         if not worker_id or not symbol:
+            return
+            
+        # Check for terminal status to release resources
+        if status in ('STOPPED', 'STOP_LOSS', 'ERROR'):
+            self.risk_engine.unregister_worker(worker_id)
+            self.rejected_workers.discard(worker_id)
             return
 
         accepted = self.risk_engine.register_worker(worker_id, symbol)
@@ -95,8 +104,14 @@ class Orchestrator:
         self.logger.debug(f"Risk Status: {status}")
         
         if status['total_allocated'] > self.risk_engine.max_global_capital:
-            self.logger.critical("GLOBAL RISK LIMIT EXCEEDED! STOPPING ALL WORKERS.")
-            self.broadcast_command('STOP')
+            if not self.stop_broadcast_sent:
+                self.logger.critical("GLOBAL RISK LIMIT EXCEEDED! STOPPING ALL WORKERS.")
+                self.broadcast_command('STOP')
+                self.stop_broadcast_sent = True
+        else:
+            if self.stop_broadcast_sent:
+                 self.logger.info("Global risk normalization. Resetting STOP flag.")
+                 self.stop_broadcast_sent = False
 
     def perform_regime_checks(self):
         regime = self.regime_filter.analyze_market()

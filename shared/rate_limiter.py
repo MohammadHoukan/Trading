@@ -80,8 +80,8 @@ class RateLimiter:
                     
             except Exception as e:
                 self.logger.error(f"Rate limiter error: {e}")
-                # On Redis error, allow the request (fail open to prevent deadlock)
-                return True
+                # On Redis error, deny the request (fail closed to prevent IP bans)
+                return False
     
     def get_remaining(self) -> int:
         """Get remaining tokens in current window."""

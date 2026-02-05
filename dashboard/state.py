@@ -51,7 +51,11 @@ def parse_worker_rows(workers_raw, now_ts, stale_after_seconds=DEFAULT_STALE_AFT
             continue
 
         row = dict(payload)
-        row.setdefault('worker_id', worker_id)
+        # Ignore payload 'worker_id' for identity to prevent spoofing.
+        # Use the Redis hash key as the source of truth.
+        if 'worker_id' in row:
+            del row['worker_id']
+        row['worker_id'] = worker_id
 
         last_updated = _to_float(row.get('last_updated'))
         age_seconds = None if last_updated is None else max(0.0, now_ts - last_updated)
