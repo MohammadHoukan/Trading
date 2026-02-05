@@ -1,6 +1,12 @@
 
 import pandas as pd
 import numpy as np
+import sys
+import os
+
+# Path hack
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+
 from backtest.simulator import GridSimulator
 from backtest.execution_model import ExecutionModel
 from datetime import datetime, timedelta
