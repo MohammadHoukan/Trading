@@ -194,5 +194,131 @@ class TestRiskEngineIntegration(unittest.TestCase):
 
         self.assertFalse(ok)
 
+
+class TestDrawdownProtection(unittest.TestCase):
+    """Tests for portfolio-level drawdown protection."""
+
+    def setUp(self):
+        self.config = {
+            'swarm': {
+                'risk_per_bot': 100.0,
+                'max_global_capital': 500.0,
+                'max_concurrency': 5
+            },
+            'risk': {
+                'drawdown': {
+                    'warning_pct': 10.0,
+                    'reduce_pct': 15.0,
+                    'halt_pct': 20.0,
+                    'scale_factor': 0.5
+                }
+            }
+        }
+        self.risk_engine = RiskEngine(self.config)
+
+    def test_drawdown_calculation_basic(self):
+        """Test basic drawdown percentage calculation."""
+        # Start with positive equity
+        self.risk_engine.update_worker_pnl('w1', realized_pnl=100.0, unrealized_pnl=0.0)
+        self.assertEqual(self.risk_engine.peak_equity, 100.0)
+        self.assertEqual(self.risk_engine.current_equity, 100.0)
+        self.assertEqual(self.risk_engine.get_drawdown_pct(), 0.0)
+
+        # Now lose some money
+        self.risk_engine.update_worker_pnl('w1', realized_pnl=100.0, unrealized_pnl=-20.0)
+        self.assertEqual(self.risk_engine.current_equity, 80.0)
+        self.assertEqual(self.risk_engine.peak_equity, 100.0)  # Peak unchanged
+        self.assertEqual(self.risk_engine.get_drawdown_pct(), 20.0)  # 20% drawdown
+
+    def test_drawdown_warning_threshold(self):
+        """Test that warning is triggered at 10% drawdown."""
+        from manager.risk_engine import DrawdownAction
+
+        # Build up equity
+        self.risk_engine.update_worker_pnl('w1', realized_pnl=100.0, unrealized_pnl=0.0)
+
+        # 9% drawdown - should be normal
+        self.risk_engine.update_worker_pnl('w1', realized_pnl=100.0, unrealized_pnl=-9.0)
+        action = self.risk_engine.check_drawdown()
+        self.assertEqual(action, DrawdownAction.NORMAL)
+
+        # 11% drawdown - should warn but still normal action
+        self.risk_engine.update_worker_pnl('w1', realized_pnl=100.0, unrealized_pnl=-11.0)
+        action = self.risk_engine.check_drawdown()
+        self.assertEqual(action, DrawdownAction.NORMAL)  # Warning doesn't change action
+
+    def test_drawdown_reduce_threshold(self):
+        """Test that REDUCE_EXPOSURE is triggered at 15% drawdown."""
+        from manager.risk_engine import DrawdownAction
+
+        # Build up equity
+        self.risk_engine.update_worker_pnl('w1', realized_pnl=100.0, unrealized_pnl=0.0)
+
+        # 16% drawdown - should trigger reduce
+        self.risk_engine.update_worker_pnl('w1', realized_pnl=100.0, unrealized_pnl=-16.0)
+        action = self.risk_engine.check_drawdown()
+        self.assertEqual(action, DrawdownAction.REDUCE_EXPOSURE)
+        self.assertEqual(self.risk_engine.get_position_scale(), 0.5)
+
+    def test_drawdown_halt_threshold(self):
+        """Test that HALT_ALL is triggered at 20% drawdown."""
+        from manager.risk_engine import DrawdownAction
+
+        # Build up equity
+        self.risk_engine.update_worker_pnl('w1', realized_pnl=100.0, unrealized_pnl=0.0)
+
+        # 21% drawdown - should trigger halt
+        self.risk_engine.update_worker_pnl('w1', realized_pnl=100.0, unrealized_pnl=-21.0)
+        action = self.risk_engine.check_drawdown()
+        self.assertEqual(action, DrawdownAction.HALT_ALL)
+        self.assertEqual(self.risk_engine.get_position_scale(), 0.0)
+
+    def test_drawdown_recovery(self):
+        """Test that action returns to NORMAL after recovery."""
+        from manager.risk_engine import DrawdownAction
+
+        # Build up equity and then lose
+        self.risk_engine.update_worker_pnl('w1', realized_pnl=100.0, unrealized_pnl=0.0)
+        self.risk_engine.update_worker_pnl('w1', realized_pnl=100.0, unrealized_pnl=-16.0)
+        action = self.risk_engine.check_drawdown()
+        self.assertEqual(action, DrawdownAction.REDUCE_EXPOSURE)
+
+        # Recover - unrealized goes back up
+        self.risk_engine.update_worker_pnl('w1', realized_pnl=100.0, unrealized_pnl=-5.0)
+        action = self.risk_engine.check_drawdown()
+        self.assertEqual(action, DrawdownAction.NORMAL)
+
+    def test_peak_equity_updates_on_new_high(self):
+        """Test that peak equity updates when equity reaches new high."""
+        self.risk_engine.update_worker_pnl('w1', realized_pnl=50.0, unrealized_pnl=0.0)
+        self.assertEqual(self.risk_engine.peak_equity, 50.0)
+
+        self.risk_engine.update_worker_pnl('w1', realized_pnl=75.0, unrealized_pnl=0.0)
+        self.assertEqual(self.risk_engine.peak_equity, 75.0)
+
+        # Losing doesn't change peak
+        self.risk_engine.update_worker_pnl('w1', realized_pnl=75.0, unrealized_pnl=-10.0)
+        self.assertEqual(self.risk_engine.peak_equity, 75.0)
+
+    def test_multiple_workers_aggregate_pnl(self):
+        """Test that PnL from multiple workers is aggregated correctly."""
+        self.risk_engine.update_worker_pnl('w1', realized_pnl=50.0, unrealized_pnl=10.0)
+        self.risk_engine.update_worker_pnl('w2', realized_pnl=30.0, unrealized_pnl=5.0)
+
+        # Total: 50 + 10 + 30 + 5 = 95
+        self.assertEqual(self.risk_engine.current_equity, 95.0)
+        self.assertEqual(self.risk_engine.peak_equity, 95.0)
+
+    def test_cleanup_worker_pnl_recalculates(self):
+        """Test that cleanup_worker_pnl properly recalculates totals."""
+        self.risk_engine.update_worker_pnl('w1', realized_pnl=50.0, unrealized_pnl=0.0)
+        self.risk_engine.update_worker_pnl('w2', realized_pnl=30.0, unrealized_pnl=0.0)
+        self.assertEqual(self.risk_engine.current_equity, 80.0)
+
+        # Remove w1
+        self.risk_engine.cleanup_worker_pnl('w1')
+        self.assertEqual(self.risk_engine.current_equity, 30.0)
+
+
 if __name__ == '__main__':
     unittest.main()

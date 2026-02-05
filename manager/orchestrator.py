@@ -9,7 +9,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
 from shared.messaging import RedisBus
 from shared.config import load_config, get_redis_params
-from manager.risk_engine import RiskEngine
+from manager.risk_engine import RiskEngine, DrawdownAction
 from manager.regime_filter import RegimeFilter
 
 COMMAND_STREAM = 'swarm:commands'
@@ -45,8 +45,9 @@ class Orchestrator:
             # Persist terminal status to dashboard before cleanup (Fix #5)
             msg['last_updated'] = time.time()
             self.bus.hset('workers:data', worker_id, json.dumps(msg))
-            
+
             self.risk_engine.unregister_worker(worker_id)
+            self.risk_engine.cleanup_worker_pnl(worker_id)
             self.rejected_workers.discard(worker_id)
             return
 
@@ -65,6 +66,14 @@ class Orchestrator:
 
         if 'exposure' in msg:
             self.risk_engine.update_exposure(worker_id, msg['exposure'])
+
+        # Update PnL tracking for drawdown calculation
+        realized_pnl = msg.get('realized_profit', 0.0)
+        inventory = msg.get('inventory', 0.0)
+        avg_cost = msg.get('avg_cost', 0.0)
+        price = msg.get('price', 0.0)
+        unrealized_pnl = (price - avg_cost) * inventory if inventory > 0 and avg_cost > 0 else 0.0
+        self.risk_engine.update_worker_pnl(worker_id, realized_pnl, unrealized_pnl)
 
         msg['last_updated'] = time.time()
         if not self.bus.hset('workers:data', worker_id, json.dumps(msg)):
@@ -108,7 +117,8 @@ class Orchestrator:
         # Check global limits
         status = self.risk_engine.get_status()
         self.logger.debug(f"Risk Status: {status}")
-        
+
+        # 1. Check capital allocation limits
         if status['total_allocated'] > self.risk_engine.max_global_capital:
             # Fix #1: Retry STOP command while breach persists (don't silence after one attempt)
             self.logger.critical("GLOBAL RISK LIMIT EXCEEDED! STOPPING ALL WORKERS.")
@@ -118,8 +128,23 @@ class Orchestrator:
                 self.logger.error("Failed to broadcast STOP command! Will retry next tick.")
         else:
             if self.stop_broadcast_sent:
-                 self.logger.info("Global risk normalization. Resetting STOP flag.")
-                 self.stop_broadcast_sent = False
+                self.logger.info("Global risk normalization. Resetting STOP flag.")
+                self.stop_broadcast_sent = False
+
+        # 2. Check drawdown limits
+        drawdown_action = self.risk_engine.check_drawdown()
+
+        if drawdown_action == DrawdownAction.HALT_ALL:
+            # Critical drawdown - stop all trading
+            if not self.stop_broadcast_sent:
+                self.logger.critical("DRAWDOWN HALT: Stopping all workers due to excessive drawdown!")
+                self.broadcast_command('STOP')
+                self.stop_broadcast_sent = True
+
+        elif drawdown_action == DrawdownAction.REDUCE_EXPOSURE:
+            # Elevated drawdown - pause new orders but don't close positions
+            # Workers in PAUSED state won't place new orders but will manage existing ones
+            self._pause_all_workers_for_drawdown()
 
     def _get_active_symbols(self):
         """Get list of unique symbols from active workers."""
@@ -198,6 +223,24 @@ class Orchestrator:
                     pass
         except Exception as e:
             self.logger.error(f"Failed to resume workers for {symbol}: {e}")
+
+    def _pause_all_workers_for_drawdown(self):
+        """Pause all running workers due to drawdown threshold breach."""
+        try:
+            worker_data = self.bus.hgetall('workers:data')
+            paused_count = 0
+            for worker_id, data in worker_data.items():
+                try:
+                    w = json.loads(data)
+                    if w.get('status') == 'RUNNING':
+                        self.broadcast_command('PAUSE', target=worker_id)
+                        paused_count += 1
+                except Exception:
+                    pass
+            if paused_count > 0:
+                self.logger.warning(f"Paused {paused_count} workers due to elevated drawdown")
+        except Exception as e:
+            self.logger.error(f"Failed to pause workers for drawdown: {e}")
 
     def broadcast_command(self, cmd, target='all'):
         """Broadcast command to workers. Returns True on success, False on failure."""
