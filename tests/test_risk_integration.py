@@ -107,5 +107,30 @@ class TestRiskEngineIntegration(unittest.TestCase):
         orch.bus.hset.assert_called_once()
         orch.logger.error.assert_called_once_with("Failed to persist worker snapshot for w1")
 
+    def test_orchestrator_retries_stop_on_sustained_breach(self):
+        """Test that STOP is broadcast repeatedly while risk limit is exceeded."""
+        orch = Orchestrator.__new__(Orchestrator)
+        orch.config = {'redis': {'channels': {'command': 'cmd'}}}
+        orch.bus = MagicMock()
+        orch.risk_engine = self.risk_engine
+        orch.logger = MagicMock()
+        orch.stop_broadcast_sent = False
+        
+        # 1. Breach Limits
+        orch.risk_engine.update_exposure('w1', 600.0) # Limit is 500
+        
+        # 2. First Check -> Should Broadcast
+        orch.bus.publish.return_value = True
+        orch.perform_risk_checks()
+        orch.bus.publish.assert_called_with('cmd', {'command': 'STOP', 'target': 'all'})
+        self.assertTrue(orch.stop_broadcast_sent)
+        
+        # Reset mock to check next call
+        orch.bus.publish.reset_mock()
+        
+        # 3. Second Check (Still Breached) -> Should Broadcast AGAIN (Fix #1)
+        orch.perform_risk_checks()
+        orch.bus.publish.assert_called_with('cmd', {'command': 'STOP', 'target': 'all'})
+
 if __name__ == '__main__':
     unittest.main()

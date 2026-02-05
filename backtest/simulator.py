@@ -199,7 +199,8 @@ class GridSimulator:
                                 capital -= cost + fee
                                 
                                 # Update inventory and avg cost
-                                total_cost = (avg_cost * inventory) + (grid_price * self.amount_per_grid)
+                                # Fix #7: Include buy fee in cost basis for accurate PnL
+                                total_cost = (avg_cost * inventory) + (grid_price * self.amount_per_grid) + fee
                                 inventory += self.amount_per_grid
                                 avg_cost = total_cost / inventory if inventory > 0 else 0.0
                                 

@@ -108,11 +108,12 @@ class Orchestrator:
         self.logger.debug(f"Risk Status: {status}")
         
         if status['total_allocated'] > self.risk_engine.max_global_capital:
-            if not self.stop_broadcast_sent:
-                self.logger.critical("GLOBAL RISK LIMIT EXCEEDED! STOPPING ALL WORKERS.")
-                if self.broadcast_command('STOP'):
-                    self.stop_broadcast_sent = True
-                # If broadcast failed, we'll retry on next check
+            # Fix #1: Retry STOP command while breach persists (don't silence after one attempt)
+            self.logger.critical("GLOBAL RISK LIMIT EXCEEDED! STOPPING ALL WORKERS.")
+            if self.broadcast_command('STOP'):
+                self.stop_broadcast_sent = True
+            else:
+                self.logger.error("Failed to broadcast STOP command! Will retry next tick.")
         else:
             if self.stop_broadcast_sent:
                  self.logger.info("Global risk normalization. Resetting STOP flag.")
