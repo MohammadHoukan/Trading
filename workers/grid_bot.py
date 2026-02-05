@@ -303,6 +303,30 @@ class GridBot:
                     continue
                 try:
                     self.order_manager.cancel_order(order_id, self.symbol)
+                    # Log CANCEL event for ML training data
+                    # Look up grid level from tracked orders
+                    grid_level = -1
+                    side = order.get('side', 'unknown')
+                    price = order.get('price', 0.0)
+                    amount = order.get('amount', 0.0)
+                    for i, grid in enumerate(self.grids):
+                        for tracked in grid['orders']:
+                            if tracked['id'] == order_id:
+                                grid_level = i
+                                side = tracked.get('side', side)
+                                price = tracked.get('price', price)
+                                amount = tracked.get('amount', amount)
+                                break
+                        if grid_level >= 0:
+                            break
+                    self._log_grid_event(
+                        event_type='CANCEL',
+                        side=side,
+                        price=price,
+                        amount=amount,
+                        grid_level=grid_level,
+                        order_id=order_id
+                    )
                 except Exception as e:
                     self.logger.error(f"Failed to cancel order {order_id}: {e}")
 
