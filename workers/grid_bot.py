@@ -130,9 +130,20 @@ class GridBot:
         """Background thread to keep the API Key lock alive."""
         while self.running:
             try:
-                if self.key_lock_id:
-                    # Extend lock by 60s
-                    self.bus.expire(self.key_lock_id, 60)
+                if self.key_lock_id and self.worker_id:
+                    # Lua script to verify ownership before extending
+                    script = """
+                    if redis.call("get", KEYS[1]) == ARGV[1] then
+                        return redis.call("expire", KEYS[1], ARGV[2])
+                    else
+                        return 0
+                    end
+                    """
+                    result = self.bus.r.eval(script, 1, self.key_lock_id, self.worker_id, 60)
+                    if not result:
+                        self.logger.warning("Lost API Key lock ownership! Stopping renewal.")
+                        self.key_lock_id = None  # Stop trying
+                        # Ideally trigger a stop or re-acquire, but for now just warn/stop renewing
             except Exception as e:
                 self.logger.error(f"Failed to renew API Key lock: {e}")
             time.sleep(30)
@@ -453,14 +464,14 @@ class GridBot:
                     time.sleep(1)
                     continue
 
-                # 3. Fetch current price
+                # 3. Watchdog: Check for stale data (BEFORE fetching new)
+                if self._check_stale_data():
+                   self.logger.warning("Data is stale - attempting fresh fetch...")
+
+                # 4. Fetch current price
                 ticker = self.order_manager.fetch_ticker(self.symbol)
                 last_price = ticker['last']
                 self.last_price_update = time.time()
-                
-                # 4. Watchdog: Check for stale data
-                if self._check_stale_data():
-                    continue
                 
                 # 5. Stop-Loss Check (CRITICAL SAFETY)
                 if self._check_stop_loss(last_price):
@@ -489,7 +500,7 @@ class GridBot:
         try:
             messages = self.bus.xreadgroup(
                 COMMAND_GROUP, self.worker_id, COMMAND_STREAM, 
-                count=10, block=0  # Non-blocking
+                count=10, block=1000  # Blocking 1s (prevents busy wait, allows heartbeats)
             )
             for msg_id, fields in messages:
                 self.handle_message(fields)

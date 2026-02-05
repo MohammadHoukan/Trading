@@ -27,6 +27,15 @@ class RiskEngine:
         self.logger.info(f"Worker {worker_id} ({symbol}) registered.")
         return True
 
+    def unregister_worker(self, worker_id):
+        """Remove a worker and clear its allocation."""
+        if worker_id in self.active_bots:
+            self.active_bots.remove(worker_id)
+        
+        if worker_id in self.allocations:
+            reserved = self.allocations.pop(worker_id)
+            self.logger.info(f"Worker {worker_id} unregistered. Released {reserved:.2f} capital.")
+
     def request_allocation(self, worker_id, amount):
         """Request capital allocation for a trade."""
         current_alloc = self.allocations[worker_id]
