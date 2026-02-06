@@ -137,10 +137,87 @@ class GridBot:
         # Setup Signal Handlers for Graceful Shutdown
         signal.signal(signal.SIGINT, self._handle_signal)
         signal.signal(signal.SIGTERM, self._handle_signal)
+        
+        # Market Data Cache (Shared Market Data Architecture)
+        self.cached_market_data = None
+        self.cached_market_time = 0.0
+        self.market_data_stale_threshold = 10.0  # Log warning after 10s
+        self.market_data_fallback_threshold = 30.0  # Fallback to API after 30s
+
+        # Volatility-scaled grids configuration
+        vol_cfg = self.config.get('smart_features', {}).get('volatility_grids', {})
+        self.volatility_grids_enabled = vol_cfg.get('enabled', False)
+        self.baseline_volatility = vol_cfg.get('baseline_volatility', 0.025)
+        self.volatility_scale_factor = vol_cfg.get('scale_factor', 1.5)
+        self.vol_min_multiplier = vol_cfg.get('min_multiplier', 0.5)
+        self.vol_max_multiplier = vol_cfg.get('max_multiplier', 2.0)
+        self.current_atr = None
+        self.current_atr_pct = None
+        if self.volatility_grids_enabled:
+            self.logger.info("Volatility-Scaled Grids ENABLED")
+        
+        # Start Market Data Listener Thread
+        self.market_data_channel = f"market_data:{self.symbol.replace('/', '_')}"
+        self._market_data_thread = threading.Thread(target=self._market_data_listener, daemon=True)
+        self._market_data_thread.start()
 
     def _handle_signal(self, signum, frame):
         self.logger.info(f"Received signal {signum}. Stopping...")
         self.running = False
+
+    def _market_data_listener(self):
+        """Background thread to receive market data broadcasts from Manager."""
+        try:
+            pubsub = self.bus.subscribe(self.market_data_channel)
+            self.logger.info(f"Subscribed to market data channel: {self.market_data_channel}")
+            while self.running:
+                try:
+                    msg = self.bus.get_message(pubsub)
+                    if msg and isinstance(msg, dict):
+                        price = msg.get('price')
+                        if price:
+                            self.cached_market_data = msg
+                            self.cached_market_time = time.time()
+                            # Capture ATR for volatility-scaled grids
+                            if msg.get('atr') is not None:
+                                self.current_atr = msg['atr']
+                            if msg.get('atr_pct') is not None:
+                                self.current_atr_pct = msg['atr_pct']
+                    time.sleep(0.1)  # Tight loop for real-time updates
+                except Exception as e:
+                    self.logger.error(f"Market data listener error: {e}")
+                    time.sleep(1)
+        except Exception as e:
+            self.logger.error(f"Failed to start market data listener: {e}")
+
+    def get_market_price(self):
+        """
+        Get current market price, preferring cached data from Manager broadcast.
+        Falls back to direct API call if cache is stale.
+        
+        Returns:
+            float: Current market price, or None if unavailable
+        """
+        now = time.time()
+        cache_age = now - self.cached_market_time
+        
+        # Use cached data if fresh
+        if self.cached_market_data and cache_age < self.market_data_fallback_threshold:
+            if cache_age > self.market_data_stale_threshold:
+                self.logger.warning(f"Market data is stale ({cache_age:.1f}s old)")
+            return self.cached_market_data.get('price')
+        
+        # Fallback to direct API call (rate limited)
+        self.logger.warning("Market data cache expired - falling back to direct API")
+        try:
+            ticker = self.order_manager.fetch_ticker(self.symbol)
+            if ticker and ticker.get('last'):
+                self.last_price_update = now
+                return ticker['last']
+        except Exception as e:
+            self.logger.error(f"Failed to fetch ticker fallback: {e}")
+        
+        return None
 
     def _renew_lock_loop(self):
         """Background thread to keep the API Key lock alive."""
@@ -568,6 +645,49 @@ class GridBot:
             else:
                 self.logger.warning("Price below grid! No more levels to buy.")
 
+    def _calculate_dynamic_step(self, base_step: float, current_price: float) -> float:
+        """
+        Calculate volatility-adjusted grid step size.
+
+        Uses ATR/price ratio to scale the base step:
+        - Higher volatility -> wider grids (larger step)
+        - Lower volatility -> tighter grids (smaller step)
+
+        Args:
+            base_step: The base grid step from (upper - lower) / grid_levels
+            current_price: Current market price
+
+        Returns:
+            Adjusted grid step size
+        """
+        if not self.volatility_grids_enabled:
+            return base_step
+
+        # Use ATR percentage if available
+        atr_ratio = self.current_atr_pct
+        if atr_ratio is None and self.current_atr is not None and current_price > 0:
+            atr_ratio = self.current_atr / current_price
+
+        if atr_ratio is None:
+            self.logger.debug("No ATR data available, using base step")
+            return base_step
+
+        # Calculate multiplier based on deviation from baseline volatility
+        # multiplier = 1 + k * (atr_ratio - baseline)
+        multiplier = 1 + self.volatility_scale_factor * (atr_ratio - self.baseline_volatility)
+
+        # Clamp to configured range
+        multiplier = max(self.vol_min_multiplier, min(self.vol_max_multiplier, multiplier))
+
+        dynamic_step = base_step * multiplier
+
+        self.logger.info(
+            f"Volatility-scaled grid: ATR%={atr_ratio:.4f}, "
+            f"multiplier={multiplier:.2f}, step={base_step:.4f}->{dynamic_step:.4f}"
+        )
+
+        return dynamic_step
+
     def calculate_grid_levels(self, current_price):
         if not self.strategy_params:
             self.logger.warning("No strategy params found. cannot calculate grids.")
@@ -578,7 +698,7 @@ class GridBot:
         if self.grid_levels <= 0:
             self.logger.error("grid_levels must be > 0 to calculate grids.")
             return
-        
+
         # In rolling mode, center grid around current price if outside bounds
         if self.rolling_grids_enabled and (current_price < lower or current_price > upper):
             range_size = upper - lower
@@ -589,11 +709,18 @@ class GridBot:
             self.logger.warning(f"Price {current_price} is out of bounds [{lower}, {upper}].")
             return
 
-        self.grid_step = (upper - lower) / self.grid_levels
-        
+        # Calculate base step
+        base_step = (upper - lower) / self.grid_levels
+
+        # Apply volatility scaling if enabled
+        self.grid_step = self._calculate_dynamic_step(base_step, current_price)
+
         self.grids = []
         for i in range(self.grid_levels + 1):
             price = lower + (i * self.grid_step)
+            # Ensure we don't exceed upper limit due to volatility scaling
+            if price > upper * 1.01:  # 1% tolerance
+                break
             self.grids.append({
                 'price': price,
                 'orders': [],  # List of order dicts
@@ -745,9 +872,12 @@ class GridBot:
                 if self._check_stale_data():
                    self.logger.warning("Data is stale - attempting fresh fetch...")
 
-                # 4. Fetch current price
-                ticker = self.order_manager.fetch_ticker(self.symbol)
-                last_price = ticker['last']
+                # 4. Get current price (from Manager broadcast or fallback API)
+                last_price = self.get_market_price()
+                if last_price is None:
+                    self.logger.error("No market price available, skipping tick")
+                    time.sleep(2)
+                    continue
                 self.last_price_update = time.time()
                 
                 # 5. Stop-Loss Check (CRITICAL SAFETY)

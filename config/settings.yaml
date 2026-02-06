@@ -44,3 +44,32 @@ redis:
 
 dashboard:
   worker_stale_after_seconds: ${WORKER_STALE_AFTER_SECONDS:-30}
+
+# Smart Trading Features (ML-enhanced)
+smart_features:
+  ml_enabled: ${ML_ENABLED:-true}
+
+  regime_classifier:
+    enabled: ${REGIME_CLASSIFIER_ENABLED:-true}
+    ensemble_weight: 0.6  # Weight for ML score vs rule-based score
+    confidence_threshold: 0.7  # Minimum confidence to trust ML prediction
+    model_path: "data/models/regime_classifier.joblib"
+
+  volatility_grids:
+    enabled: ${VOLATILITY_GRIDS_ENABLED:-true}
+    baseline_volatility: 0.025  # 2.5% ATR/price baseline
+    scale_factor: 1.5  # How aggressively to scale grid spacing
+    min_multiplier: 0.5  # Minimum grid spacing multiplier
+    max_multiplier: 2.0  # Maximum grid spacing multiplier
+
+  mean_reversion:
+    enabled: ${MEAN_REVERSION_ENABLED:-true}
+    sma_period: 20  # Period for SMA calculation
+    std_period: 50  # Period for standard deviation
+    entry_z_threshold: 1.5  # Z-score threshold to signal entry
+    exit_z_threshold: 0.5  # Z-score threshold to signal exit
+
+  pair_ranking_ml:
+    enabled: ${PAIR_RANKING_ML_ENABLED:-true}
+    ml_weight: 0.4  # Weight for ML prediction vs rule-based score
+    model_path: "data/models/pair_predictor.joblib"

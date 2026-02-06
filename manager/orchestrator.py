@@ -7,10 +7,15 @@ import json
 # Add root directory to python path
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
+import pandas as pd
+import pandas_ta as ta
+
 from shared.messaging import RedisBus
 from shared.config import load_config, get_redis_params
 from manager.risk_engine import RiskEngine, DrawdownAction
 from manager.regime_filter import RegimeFilter
+from manager.mean_reversion_filter import MeanReversionFilter
+from workers.order_manager import OrderManager
 
 COMMAND_STREAM = 'swarm:commands'
 
@@ -22,8 +27,12 @@ class Orchestrator:
         self.bus = RedisBus(**get_redis_params(self.config))
         self.risk_engine = RiskEngine(self.config)
         self.regime_filter = RegimeFilter(self.config)
+        self.mean_reversion_filter = MeanReversionFilter(self.config)
         self.logger = logging.getLogger("Manager")
         logging.basicConfig(level=logging.INFO)
+
+        # ATR cache for volatility-scaled grids
+        self.atr_cache = {}  # {symbol: {'atr': float, 'timestamp': float}}
         
         self.running = True
         self.regime_by_symbol = {}  # {symbol: regime} for multi-symbol awareness
@@ -33,6 +42,34 @@ class Orchestrator:
         # Track workers paused by drawdown logic so recovery resumes only those workers.
         self.drawdown_paused_workers = set()
         self.last_drawdown_action = DrawdownAction.NORMAL
+        
+        # Market Data Publisher
+        self.last_market_publish = 0.0
+        self.market_publish_interval = 2.0  # Publish prices every 2 seconds
+        
+        # Initialize OrderManager for fetching tickers
+        # Use first key from pool or legacy single key
+        if 'pool' in self.config['exchange']:
+            for creds in self.config['exchange']['pool']:
+                k = creds.get('api_key', '')
+                s = creds.get('secret', '')
+                if k and not k.startswith('${'):
+                    self.order_manager = OrderManager(
+                        self.config['exchange']['name'],
+                        k, s,
+                        testnet=(self.config['exchange'].get('mode') == 'testnet')
+                    )
+                    break
+            else:
+                self.order_manager = None
+                self.logger.warning("No valid API keys in pool for market data publishing")
+        else:
+            self.order_manager = OrderManager(
+                self.config['exchange']['name'],
+                self.config['exchange'].get('api_key', ''),
+                self.config['exchange'].get('secret', ''),
+                testnet=(self.config['exchange'].get('mode') == 'testnet')
+            )
 
     def handle_worker_update(self, msg):
         """Process a single worker status update and persist it for the dashboard."""
@@ -107,6 +144,11 @@ class Orchestrator:
                 if now - self.last_regime_check > 60:
                      self.perform_regime_checks()
                      self.last_regime_check = now
+
+                # 4. Market Data Publishing (Every 2s)
+                if now - self.last_market_publish > self.market_publish_interval:
+                    self.publish_market_data()
+                    self.last_market_publish = now
 
                 time.sleep(1)
 
@@ -451,6 +493,102 @@ class Orchestrator:
 
         self.logger.info(f"Updated {updated} workers for {symbol}")
         return updated
+
+    def publish_market_data(self):
+        """
+        Fetch current prices for all active symbols and broadcast via Redis.
+        Workers subscribe to 'market_data:{symbol}' channels.
+
+        Also calculates and broadcasts ATR for volatility-scaled grids.
+        """
+        if not self.order_manager:
+            return
+
+        active_symbols = self._get_active_symbols()
+        if not active_symbols:
+            return
+
+        for symbol in active_symbols:
+            try:
+                ticker = self.order_manager.fetch_ticker(symbol)
+                if ticker and ticker.get('last'):
+                    current_price = ticker['last']
+
+                    # Calculate ATR for volatility scaling
+                    atr = self._calculate_atr(symbol)
+                    atr_pct = (atr / current_price) if atr and current_price else None
+
+                    payload = {
+                        'symbol': symbol,
+                        'price': current_price,
+                        'bid': ticker.get('bid'),
+                        'ask': ticker.get('ask'),
+                        'atr': atr,
+                        'atr_pct': atr_pct,
+                        'timestamp': time.time()
+                    }
+                    channel = f"market_data:{symbol.replace('/', '_')}"
+                    self.bus.publish(channel, payload)
+                    self.logger.debug(
+                        f"Published market data for {symbol}: price={current_price}, atr={atr}"
+                    )
+            except Exception as e:
+                self.logger.error(f"Failed to fetch/publish market data for {symbol}: {e}")
+
+    def _calculate_atr(self, symbol: str, period: int = 14) -> float:
+        """
+        Calculate Average True Range for a symbol.
+
+        Uses caching to avoid excessive API calls.
+
+        Args:
+            symbol: Trading pair
+            period: ATR period (default 14)
+
+        Returns:
+            ATR value or None if unavailable
+        """
+        now = time.time()
+
+        # Check cache (ATR doesn't change rapidly, cache for 60 seconds)
+        if symbol in self.atr_cache:
+            cached = self.atr_cache[symbol]
+            if now - cached['timestamp'] < 60:
+                return cached['atr']
+
+        try:
+            # Fetch OHLCV data
+            candles = self.order_manager.exchange.fetch_ohlcv(
+                symbol, '1h', limit=period + 10
+            )
+            if not candles or len(candles) < period:
+                return None
+
+            df = pd.DataFrame(
+                candles, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']
+            )
+
+            # Calculate ATR using pandas_ta
+            atr = df.ta.atr(high=df['high'], low=df['low'], close=df['close'], length=period)
+
+            if atr is None or atr.empty:
+                return None
+
+            atr_value = atr.iloc[-1]
+            if pd.isna(atr_value):
+                return None
+
+            # Cache the result
+            self.atr_cache[symbol] = {
+                'atr': float(atr_value),
+                'timestamp': now
+            }
+
+            return float(atr_value)
+
+        except Exception as e:
+            self.logger.warning(f"Failed to calculate ATR for {symbol}: {e}")
+            return None
 
     def shutdown(self):
         self.logger.info("Shutting down... sending STOP to all workers.")

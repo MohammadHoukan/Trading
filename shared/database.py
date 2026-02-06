@@ -174,3 +174,187 @@ class Database:
                 conn.close()
         except Exception as e:
             self.logger.error(f"DB Error log_grid_event: {e}")
+
+    # ========== ML Training Data Query Methods ==========
+
+    def get_grid_events(self, symbol: str = None, since: float = None,
+                       source: str = None, event_type: str = None) -> list:
+        """
+        Query grid events for ML training.
+
+        Args:
+            symbol: Filter by trading pair (optional)
+            since: Filter events after this timestamp (optional)
+            source: Filter by source ('live' or 'backtest', optional)
+            event_type: Filter by event type ('FILL', 'PLACE', 'CANCEL', optional)
+
+        Returns:
+            List of event dicts
+        """
+        try:
+            conn = self.get_connection()
+            try:
+                cursor = conn.cursor()
+
+                query = 'SELECT * FROM grid_events WHERE 1=1'
+                params = []
+
+                if symbol:
+                    query += ' AND symbol = ?'
+                    params.append(symbol)
+                if since:
+                    query += ' AND timestamp > ?'
+                    params.append(since)
+                if source:
+                    query += ' AND source = ?'
+                    params.append(source)
+                if event_type:
+                    query += ' AND event_type = ?'
+                    params.append(event_type)
+
+                query += ' ORDER BY timestamp ASC'
+
+                cursor.execute(query, params)
+                columns = [desc[0] for desc in cursor.description]
+                rows = cursor.fetchall()
+
+                return [dict(zip(columns, row)) for row in rows]
+            finally:
+                conn.close()
+        except Exception as e:
+            self.logger.error(f"DB Error get_grid_events: {e}")
+            return []
+
+    def get_backtest_metrics(self, symbol: str, lookback_days: int = 30) -> dict:
+        """
+        Calculate backtest metrics for a symbol from grid_events.
+
+        Args:
+            symbol: Trading pair
+            lookback_days: Number of days to look back
+
+        Returns:
+            Dict with metrics: sharpe_ratio, win_rate, max_drawdown, profit_factor,
+                              avg_trade_return, trade_count
+        """
+        import time
+        since = time.time() - (lookback_days * 24 * 3600)
+
+        events = self.get_grid_events(
+            symbol=symbol,
+            since=since,
+            event_type='FILL'
+        )
+
+        if not events:
+            return {
+                'sharpe_ratio': 0.0,
+                'win_rate': 0.5,
+                'max_drawdown': 0.0,
+                'profit_factor': 1.0,
+                'avg_trade_return': 0.0,
+                'trade_count': 0,
+            }
+
+        # Calculate metrics
+        trades = []
+        buy_queue = []
+
+        for event in events:
+            side = event.get('side')
+            price = event.get('price', 0)
+            amount = event.get('amount', 0)
+
+            if side == 'buy':
+                buy_queue.append({'price': price, 'amount': amount})
+            elif side == 'sell' and buy_queue:
+                # FIFO matching
+                buy = buy_queue.pop(0)
+                trade_return = (price - buy['price']) / buy['price']
+                trades.append(trade_return)
+
+        if not trades:
+            return {
+                'sharpe_ratio': 0.0,
+                'win_rate': 0.5,
+                'max_drawdown': 0.0,
+                'profit_factor': 1.0,
+                'avg_trade_return': 0.0,
+                'trade_count': 0,
+            }
+
+        import numpy as np
+        trades = np.array(trades)
+
+        # Win rate
+        win_rate = np.sum(trades > 0) / len(trades) if len(trades) > 0 else 0.5
+
+        # Sharpe ratio (simplified - annualized assuming hourly trades)
+        mean_return = np.mean(trades)
+        std_return = np.std(trades) if len(trades) > 1 else 1.0
+        sharpe_ratio = (mean_return / std_return) * np.sqrt(8760) if std_return > 0 else 0.0
+
+        # Profit factor
+        gross_profit = np.sum(trades[trades > 0]) if np.any(trades > 0) else 0.0
+        gross_loss = abs(np.sum(trades[trades < 0])) if np.any(trades < 0) else 0.0
+        profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else min(gross_profit * 10, 100.0)
+
+        # Max drawdown (simplified from cumulative returns)
+        cumulative = np.cumsum(trades)
+        running_max = np.maximum.accumulate(cumulative)
+        drawdown = running_max - cumulative
+        max_drawdown = np.max(drawdown) if len(drawdown) > 0 else 0.0
+
+        return {
+            'sharpe_ratio': float(sharpe_ratio),
+            'win_rate': float(win_rate),
+            'max_drawdown': float(max_drawdown),
+            'profit_factor': min(float(profit_factor), 100.0),
+            'avg_trade_return': float(mean_return),
+            'trade_count': len(trades),
+        }
+
+    def get_fill_statistics(self, symbol: str, lookback_hours: int = 24) -> dict:
+        """
+        Get fill rate statistics for a symbol.
+
+        Args:
+            symbol: Trading pair
+            lookback_hours: Hours to look back
+
+        Returns:
+            Dict with fill_rate, total_fills, total_places
+        """
+        import time
+        since = time.time() - (lookback_hours * 3600)
+
+        try:
+            conn = self.get_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT
+                        SUM(CASE WHEN event_type = 'FILL' THEN 1 ELSE 0 END) as fills,
+                        SUM(CASE WHEN event_type = 'PLACE' THEN 1 ELSE 0 END) as places
+                    FROM grid_events
+                    WHERE symbol = ? AND timestamp > ?
+                ''', (symbol, since))
+
+                row = cursor.fetchone()
+
+                if row and row[1] and row[1] > 0:
+                    return {
+                        'fill_rate': row[0] / row[1],
+                        'total_fills': row[0],
+                        'total_places': row[1],
+                    }
+                return {
+                    'fill_rate': None,
+                    'total_fills': 0,
+                    'total_places': 0,
+                }
+            finally:
+                conn.close()
+        except Exception as e:
+            self.logger.error(f"DB Error get_fill_statistics: {e}")
+            return {'fill_rate': None, 'total_fills': 0, 'total_places': 0}
