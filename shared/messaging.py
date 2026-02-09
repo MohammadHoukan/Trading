@@ -171,7 +171,17 @@ class RedisBus:
                 count=count,
             )
             # redis-py returns (next_start_id, [(id, fields), ...], [deleted_ids?]).
-            messages = result[1] if isinstance(result, tuple) and len(result) >= 2 else result
+            # Note: Depending on version/client options, it might be a list or tuple.
+            
+            # Normalize list to tuple if needed for unpacking, OR inspect by index
+            if isinstance(result, list):
+                result = tuple(result)
+            
+            if not isinstance(result, tuple) or len(result) < 2:
+                self.logger.error(f"Unexpected xautoclaim result format: {result}")
+                return []
+                
+            messages = result[1]
             if not messages:
                 return []
             return [(msg_id, fields) for msg_id, fields in messages]
